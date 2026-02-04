@@ -1,0 +1,423 @@
+"use client";
+
+import { useState, useCallback, useRef, useEffect } from "react";
+
+// Connect directly to backend to avoid Next.js proxy buffering SSE
+// In production, this would be configured via environment variable
+const BACKEND_URL = typeof window !== 'undefined' 
+  ? (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000")
+  : "http://localhost:4000";
+
+// Types for investigation state
+export interface WorkflowStep {
+  id: string;
+  name: string;
+  description: string;
+  phase: string;
+}
+
+export interface TraceEvent {
+  type: string;
+  node: string;
+  timestamp: string;
+  data: Record<string, any>;
+}
+
+export interface DimensionalScores {
+  behavioral_anomaly: number;
+  network_risk: number;
+  velocity_risk: number;
+  typology_match: number;
+  infrastructure_risk: number;
+}
+
+export interface TypologyAssessment {
+  primary_typology: string;
+  confidence: number;
+  reasoning: string;
+  secondary_typology?: string;
+  indicators: string[];
+}
+
+export interface RiskAssessment {
+  dimension_scores: DimensionalScores;
+  amplification_factor: number;
+  final_risk_score: number;
+  risk_level: string;
+  reasoning: string;
+}
+
+export interface Decision {
+  recommended_action: string;
+  confidence: number;
+  reasoning: string;
+  alternative_action?: string;
+  requires_human_review: boolean;
+}
+
+export interface GraphNode {
+  id: string;
+  label: string;
+  type: string;
+  risk_level?: string;
+  is_flagged: boolean;
+  properties: Record<string, any>;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  label?: string;
+  properties: Record<string, any>;
+}
+
+// New agentic workflow types
+export interface FinalAssessment {
+  typology: string;
+  risk_level: string;
+  risk_score: number;
+  decision: string;
+  reasoning: string;
+  iteration: number;
+  tool_calls_made: number;
+}
+
+export interface ToolCall {
+  tool: string;
+  params: Record<string, any>;
+  result?: Record<string, any>;
+  timestamp: string;
+  iteration: number;
+}
+
+export interface InvestigationState {
+  investigation_id?: string;
+  user_id?: string;
+  status: "idle" | "connecting" | "running" | "completed" | "error";
+  currentNode: string;
+  currentPhase: string;
+  steps: WorkflowStep[];
+  completedSteps: string[];
+  traceEvents: TraceEvent[];
+  
+  // Agentic workflow state
+  initialEvidence?: Record<string, any>;
+  toolCalls: ToolCall[];
+  agentIterations: number;
+  finalAssessment?: FinalAssessment;
+  
+  // Legacy evidence (for backwards compatibility)
+  alertEvidence?: Record<string, any>;
+  accountProfile?: Record<string, any>;
+  networkEvidence?: {
+    shared_device_users: any[];
+    shared_device_count: number;
+    flagged_connections: any[];
+    fraud_ring_members: string[];
+    network_topology: string;
+    hub_score: number;
+    subgraph_nodes: GraphNode[];
+    subgraph_edges: GraphEdge[];
+  };
+  timelineEvidence?: Record<string, any>;
+  
+  // LLM results
+  typology?: TypologyAssessment;
+  risk?: RiskAssessment;
+  decision?: Decision;
+  report?: string;
+  
+  // Error
+  error?: string;
+}
+
+const initialState: InvestigationState = {
+  status: "idle",
+  currentNode: "",
+  currentPhase: "",
+  steps: [],
+  completedSteps: [],
+  traceEvents: [],
+  toolCalls: [],
+  agentIterations: 0,
+};
+
+export function useInvestigation() {
+  const [state, setState] = useState<InvestigationState>(initialState);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Cleanup function
+  const cleanup = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return cleanup;
+  }, [cleanup]);
+
+  // Start investigation
+  const startInvestigation = useCallback(
+    async (userId: string, investigationId?: string) => {
+      cleanup();
+
+      setState((prev) => ({
+        ...initialState,
+        status: "connecting",
+        user_id: userId,
+        investigation_id: investigationId,
+      }));
+
+      try {
+        // Build SSE URL - connect directly to backend
+        let url = `${BACKEND_URL}/investigation/${userId}/stream`;
+        if (investigationId) {
+          url += `?investigation_id=${investigationId}`;
+        }
+
+        console.log("[Investigation] Connecting to:", url);
+
+        // Create EventSource for SSE
+        const eventSource = new EventSource(url);
+        eventSourceRef.current = eventSource;
+
+        eventSource.onopen = () => {
+          console.log("[Investigation] SSE connection opened");
+          setState((prev) => ({
+            ...prev,
+            status: "running",
+          }));
+        };
+
+        // Handle 'start' event
+        eventSource.addEventListener("start", (event) => {
+          console.log("[Investigation] Start event received:", event.data);
+          const data = JSON.parse(event.data);
+          setState((prev) => ({
+            ...prev,
+            investigation_id: data.investigation_id,
+            user_id: data.user_id,
+            steps: data.steps || [],
+            status: "running",
+          }));
+        });
+
+        // Handle 'trace' event
+        eventSource.addEventListener("trace", (event) => {
+          const trace: TraceEvent = JSON.parse(event.data);
+          console.log(`[Investigation] Trace: ${trace.type} - ${trace.node}`, trace.data);
+          setState((prev) => {
+            const newCompletedSteps = [...prev.completedSteps];
+            const newToolCalls = [...prev.toolCalls];
+            let newIterations = prev.agentIterations;
+            let newAssessment = prev.finalAssessment;
+            
+            // Mark step as complete when node_complete event arrives
+            if (trace.type === "node_complete" && !newCompletedSteps.includes(trace.node)) {
+              newCompletedSteps.push(trace.node);
+              console.log(`[Investigation] Step completed: ${trace.node}`);
+            }
+            
+            // Track tool calls from agent
+            if (trace.type === "tool_call" && trace.data) {
+              const toolCall: ToolCall = {
+                tool: trace.data.tool || "unknown",
+                params: trace.data.params || {},
+                timestamp: trace.timestamp || trace.data.timestamp,
+                iteration: trace.data.iteration || newIterations,
+              };
+              newToolCalls.push(toolCall);
+              console.log(`[Investigation] Tool call: ${toolCall.tool}`);
+            }
+            
+            // Track agent iterations
+            if (trace.type === "agent_iteration" && trace.data?.iteration) {
+              newIterations = Math.max(newIterations, trace.data.iteration);
+            }
+            
+            // Track final assessment
+            if (trace.type === "assessment" && trace.data) {
+              newAssessment = {
+                typology: trace.data.typology || "unknown",
+                risk_level: trace.data.risk_level || "unknown",
+                risk_score: trace.data.risk_score || 0,
+                decision: trace.data.decision || "pending",
+                reasoning: trace.data.reasoning || "",
+                iteration: trace.data.iteration || newIterations,
+                tool_calls_made: newToolCalls.length,
+              };
+            }
+            
+            return {
+              ...prev,
+              currentNode: trace.node,
+              traceEvents: [...prev.traceEvents, trace],
+              completedSteps: newCompletedSteps,
+              toolCalls: newToolCalls,
+              agentIterations: newIterations,
+              finalAssessment: newAssessment,
+            };
+          });
+        });
+
+        // Handle 'progress' event
+        eventSource.addEventListener("progress", (event) => {
+          const data = JSON.parse(event.data);
+          
+          setState((prev) => {
+            const updates: Partial<InvestigationState> = {
+              currentNode: data.node || prev.currentNode,
+              currentPhase: data.phase || prev.currentPhase,
+            };
+
+            // Update evidence based on node
+            if (data.alert_evidence) {
+              updates.alertEvidence = data.alert_evidence;
+            }
+            if (data.account_profile) {
+              updates.accountProfile = data.account_profile;
+            }
+            if (data.network_evidence) {
+              updates.networkEvidence = data.network_evidence;
+            }
+            if (data.timeline_evidence) {
+              updates.timelineEvidence = data.timeline_evidence;
+            }
+            if (data.typology_assessment) {
+              updates.typology = data.typology_assessment;
+            }
+            if (data.risk_assessment) {
+              updates.risk = data.risk_assessment;
+            }
+            if (data.decision) {
+              updates.decision = data.decision;
+            }
+            if (data.report_markdown) {
+              updates.report = data.report_markdown;
+            }
+            
+            // Handle new agentic workflow data
+            if (data.initial_evidence) {
+              updates.initialEvidence = data.initial_evidence;
+            }
+            if (data.final_assessment) {
+              updates.finalAssessment = data.final_assessment;
+            }
+            if (data.tool_calls) {
+              updates.toolCalls = data.tool_calls;
+            }
+            if (data.agent_iterations !== undefined) {
+              updates.agentIterations = data.agent_iterations;
+            }
+
+            return { ...prev, ...updates };
+          });
+        });
+
+        // Handle 'complete' event
+        eventSource.addEventListener("complete", (event) => {
+          const data = JSON.parse(event.data);
+          setState((prev) => ({
+            ...prev,
+            status: "completed",
+            investigation_id: data.investigation_id,
+          }));
+          eventSource.close();
+        });
+
+        // Handle 'error' event
+        eventSource.addEventListener("error", (event) => {
+          // Check if it's a custom error event or connection error
+          if (event instanceof MessageEvent && event.data) {
+            try {
+              const data = JSON.parse(event.data);
+              setState((prev) => ({
+                ...prev,
+                status: "error",
+                error: data.error || "Unknown error",
+              }));
+            } catch {
+              // Not a custom error, likely connection issue
+            }
+          }
+        });
+
+        // Handle connection errors
+        eventSource.onerror = (error) => {
+          console.error("[Investigation] SSE error:", error, "readyState:", eventSource.readyState);
+          if (eventSource.readyState === EventSource.CLOSED) {
+            setState((prev) => ({
+              ...prev,
+              status: prev.status === "completed" ? "completed" : "error",
+              error: prev.status === "completed" ? undefined : "Connection lost",
+            }));
+          }
+        };
+
+        // Generic message handler to catch any unhandled events
+        eventSource.onmessage = (event) => {
+          console.log("[Investigation] Generic message:", event.data);
+        };
+      } catch (error) {
+        setState((prev) => ({
+          ...prev,
+          status: "error",
+          error: error instanceof Error ? error.message : "Failed to start investigation",
+        }));
+      }
+    },
+    [cleanup]
+  );
+
+  // Stop investigation
+  const stopInvestigation = useCallback(() => {
+    cleanup();
+    setState((prev) => ({
+      ...prev,
+      status: prev.status === "completed" ? "completed" : "idle",
+    }));
+  }, [cleanup]);
+
+  // Reset state
+  const reset = useCallback(() => {
+    cleanup();
+    setState(initialState);
+  }, [cleanup]);
+
+  // Get step status
+  const getStepStatus = useCallback(
+    (stepId: string): "pending" | "running" | "completed" => {
+      if (state.completedSteps.includes(stepId)) {
+        return "completed";
+      }
+      if (state.currentNode === stepId) {
+        return "running";
+      }
+      return "pending";
+    },
+    [state.completedSteps, state.currentNode]
+  );
+
+  // Calculate progress percentage
+  const progress = state.steps.length > 0
+    ? Math.round((state.completedSteps.length / state.steps.length) * 100)
+    : 0;
+
+  return {
+    ...state,
+    progress,
+    startInvestigation,
+    stopInvestigation,
+    reset,
+    getStepStatus,
+  };
+}

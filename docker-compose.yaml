@@ -1,0 +1,130 @@
+services:
+  aerospike-db:
+    image: aerospike/aerospike-server-enterprise:8.0.0.7
+    container_name: aerospike-db
+    healthcheck:
+      test: ["CMD", "asinfo", "-p", "3000", "-v", "build"]
+      interval: 5s
+      timeout: 20s
+      retries: 4
+    networks:
+      - asgraph_net
+    ports:
+      - "3000-3002:3000-3002"
+  aerospike-graph-service:
+    image: aerospike/aerospike-graph-service:3.0.0
+    container_name: asgraph-service
+    depends_on:
+      aerospike-db:
+        condition: service_healthy
+      zipkin:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+    environment:
+      - aerospike.client.namespace=test
+      - aerospike.client.host=aerospike-db
+      - aerospike.graph.index.vertex.label.enabled=true
+      - aerospike.graph.query-tracing.threshold-ms=5
+      - aerospike.graph.query-tracing.opentelemetry-host=zipkin
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/healthcheck"]
+      interval: 5s
+      timeout: 10s
+      retries: 4
+    networks:
+      - asgraph_net
+    ports:
+      - "8182:8182"
+      - "9090:9090"
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: asgraph-zipkin
+    networks:
+      - asgraph_net
+    ports:
+      - "9411:9411"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9411/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 4
+  ollama:
+    image: ollama/ollama:latest
+    container_name: asgraph-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - asgraph_net
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 0"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: "asgraph-backend"
+    depends_on:
+      aerospike-db:
+        condition: service_healthy
+      aerospike-graph-service:
+        condition: service_healthy
+      # Using host's Ollama instead of Docker container for GPU support
+    environment:
+      - AEROSPIKE_HOST=aerospike-db
+      - AEROSPIKE_KV_PORT=3000
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=mistral
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://0.0.0.0:4000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 4
+    networks:
+      - asgraph_net
+    ports:
+      - "4000:4000"
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    container_name: "asgraph-frontend"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - BACKEND_URL=http://asgraph-backend:4000
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:4000
+    networks:
+      - asgraph_net
+    ports:
+      - "8080:8080"
+  generator:
+    build:
+      context: .
+      dockerfile: generator.Dockerfile
+    container_name: "asgraph-generator"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - asgraph_net
+    ports:
+      - "4001:4001"
+networks:
+  asgraph_net:
+    name: asgraph_net
+
+volumes:
+  ollama_data:
