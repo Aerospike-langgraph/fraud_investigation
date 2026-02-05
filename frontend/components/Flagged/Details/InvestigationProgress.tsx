@@ -129,12 +129,12 @@ export function InvestigationProgress({
 
   if (status === "idle") {
     return (
-      <Card className="bg-zinc-900 border-zinc-800">
+      <Card className="bg-white border-slate-200 shadow-sm">
         <CardContent className="pt-6">
-          <div className="text-center text-zinc-500">
+          <div className="text-center text-slate-500">
             <Brain className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p>Click &quot;Start AI Investigation&quot; to begin</p>
-            <p className="text-xs mt-2 text-zinc-600">
+            <p className="text-slate-600">Click &quot;Start AI Investigation&quot; to begin</p>
+            <p className="text-xs mt-2 text-slate-500">
               The AI agent will analyze the account using multiple tools
             </p>
           </div>
@@ -145,12 +145,12 @@ export function InvestigationProgress({
 
   if (status === "connecting") {
     return (
-      <Card className="bg-zinc-900 border-zinc-800">
+      <Card className="bg-white border-slate-200 shadow-sm">
         <CardContent className="pt-6">
           <div className="text-center">
-            <Loader2 className="w-12 h-12 mx-auto mb-4 animate-spin text-blue-500" />
-            <p className="text-zinc-400">Connecting to AI investigation service...</p>
-            <p className="text-zinc-500 text-sm mt-2">Establishing connection to backend</p>
+            <Loader2 className="w-12 h-12 mx-auto mb-4 animate-spin text-indigo-500" />
+            <p className="text-slate-600">Connecting to AI investigation service...</p>
+            <p className="text-slate-500 text-sm mt-2">Establishing connection to backend</p>
           </div>
         </CardContent>
       </Card>
@@ -159,12 +159,12 @@ export function InvestigationProgress({
 
   if (status === "error") {
     return (
-      <Card className="bg-zinc-900 border-red-900/50">
+      <Card className="bg-white border-red-200 shadow-sm">
         <CardContent className="pt-6">
           <div className="text-center">
             <AlertCircle className="w-12 h-12 mx-auto mb-4 text-red-500" />
-            <p className="text-red-400 font-medium">Investigation Error</p>
-            <p className="text-zinc-500 text-sm mt-2">{error || "An error occurred"}</p>
+            <p className="text-red-600 font-medium">Investigation Error</p>
+            <p className="text-slate-500 text-sm mt-2">{error || "An error occurred"}</p>
           </div>
         </CardContent>
       </Card>
@@ -172,12 +172,12 @@ export function InvestigationProgress({
   }
 
   return (
-    <Card className="bg-zinc-900 border-zinc-800">
+    <Card className="bg-white border-slate-200 shadow-sm">
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-lg flex items-center gap-2">
+          <CardTitle className="text-lg flex items-center gap-2 text-slate-900">
             {status === "running" && (
-              <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
+              <Loader2 className="w-5 h-5 animate-spin text-indigo-500" />
             )}
             {status === "completed" && (
               <CheckCircle className="w-5 h-5 text-emerald-500" />
@@ -186,18 +186,17 @@ export function InvestigationProgress({
           </CardTitle>
           <div className="flex items-center gap-2">
             {toolCalls.length > 0 && (
-              <Badge variant="outline" className="text-xs border-purple-700 text-purple-400">
+              <Badge variant="outline" className="text-xs border-purple-200 text-purple-600">
                 {toolCalls.length} tool calls
               </Badge>
             )}
             {agentIterations > 0 && (
-              <Badge variant="outline" className="text-xs border-blue-700 text-blue-400">
+              <Badge variant="outline" className="text-xs border-indigo-200 text-indigo-600">
                 {agentIterations} iterations
               </Badge>
             )}
             <Badge
-              variant={status === "completed" ? "default" : "secondary"}
-              className={status === "completed" ? "bg-emerald-600" : ""}
+              className={status === "completed" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-700"}
             >
               {status === "completed" ? "Complete" : `${calculatedProgress}%`}
             </Badge>
@@ -208,7 +207,7 @@ export function InvestigationProgress({
         {/* Progress bar */}
         <div className="space-y-2">
           <Progress value={calculatedProgress} className="h-2" />
-          <div className="flex justify-between text-xs text-zinc-500">
+          <div className="flex justify-between text-xs text-slate-500">
             <span>{completedSteps.length} of {displaySteps.length} steps</span>
             <span>
               {currentNode 
@@ -240,22 +239,22 @@ export function InvestigationProgress({
                         ? "bg-emerald-500"
                         : phaseActive
                         ? phaseColors[phase]
-                        : "bg-zinc-700"
+                        : "bg-slate-300"
                     }`}
                   />
                   <span
                     className={`text-sm font-medium ${
                       phaseComplete
-                        ? "text-emerald-400"
+                        ? "text-emerald-600"
                         : phaseActive
-                        ? "text-zinc-200"
-                        : "text-zinc-500"
+                        ? "text-slate-900"
+                        : "text-slate-500"
                     }`}
                   >
                     {phaseLabels[phase]}
                   </span>
                   {phase === "reasoning" && (
-                    <Badge variant="outline" className="text-xs border-purple-700 text-purple-400">
+                    <Badge variant="outline" className="text-xs border-purple-200 text-purple-600">
                       AI Agent
                     </Badge>
                   )}
@@ -272,7 +271,7 @@ export function InvestigationProgress({
                         <div
                           className={`flex items-center gap-3 py-1.5 px-2 rounded transition-all ${
                             stepStatus === "running"
-                              ? "bg-zinc-800/50"
+                              ? "bg-slate-50"
                               : ""
                           }`}
                         >
@@ -281,9 +280,9 @@ export function InvestigationProgress({
                             {stepStatus === "completed" ? (
                               <CheckCircle className="w-4 h-4 text-emerald-500" />
                             ) : stepStatus === "running" ? (
-                              <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                              <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
                             ) : (
-                              <Circle className="w-4 h-4 text-zinc-600" />
+                              <Circle className="w-4 h-4 text-slate-300" />
                             )}
                           </div>
 
@@ -291,10 +290,10 @@ export function InvestigationProgress({
                           <div
                             className={`flex-shrink-0 ${
                               stepStatus === "completed"
-                                ? "text-zinc-400"
+                                ? "text-slate-500"
                                 : stepStatus === "running"
-                                ? "text-blue-400"
-                                : "text-zinc-600"
+                                ? "text-indigo-500"
+                                : "text-slate-400"
                             }`}
                           >
                             {stepIcons[step.id] || <Circle className="w-4 h-4" />}
@@ -305,16 +304,16 @@ export function InvestigationProgress({
                             <p
                               className={`text-sm ${
                                 stepStatus === "completed"
-                                  ? "text-zinc-400"
+                                  ? "text-slate-600"
                                   : stepStatus === "running"
-                                  ? "text-zinc-200"
-                                  : "text-zinc-600"
+                                  ? "text-slate-900"
+                                  : "text-slate-400"
                               }`}
                             >
                               {step.name}
                             </p>
                             {stepStatus === "running" && (
-                              <p className="text-xs text-zinc-500 truncate">
+                              <p className="text-xs text-slate-500 truncate">
                                 {step.description}
                               </p>
                             )}
@@ -322,7 +321,7 @@ export function InvestigationProgress({
 
                           {/* Tool call count for agent step */}
                           {isAgentStep && toolCalls.length > 0 && (
-                            <Badge variant="outline" className="text-xs">
+                            <Badge variant="outline" className="text-xs border-slate-300">
                               {toolCalls.length} tools
                             </Badge>
                           )}
@@ -333,7 +332,7 @@ export function InvestigationProgress({
                           <div className="ml-10 mt-2">
                             <button
                               onClick={() => setShowToolCalls(!showToolCalls)}
-                              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 transition-colors"
                             >
                               <Wrench className="w-3 h-3" />
                               <span>Tool Calls ({toolCalls.length})</span>
@@ -349,13 +348,13 @@ export function InvestigationProgress({
                                 {toolCalls.map((call, idx) => (
                                   <div
                                     key={idx}
-                                    className="flex items-start gap-2 text-xs bg-zinc-800/50 rounded px-2 py-1.5"
+                                    className="flex items-start gap-2 text-xs bg-slate-50 rounded px-2 py-1.5 border border-slate-100"
                                   >
-                                    <span className="text-zinc-500 font-mono w-4">{idx + 1}.</span>
+                                    <span className="text-slate-400 font-mono w-4">{idx + 1}.</span>
                                     <div className="flex-1 min-w-0">
-                                      <span className="font-medium text-purple-400">{call.tool}</span>
+                                      <span className="font-medium text-purple-600">{call.tool}</span>
                                       {Object.keys(call.params).length > 0 && (
-                                        <span className="text-zinc-500">
+                                        <span className="text-slate-500">
                                           ({Object.entries(call.params)
                                             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
                                             .join(", ")
@@ -364,7 +363,7 @@ export function InvestigationProgress({
                                         </span>
                                       )}
                                       {call.result_summary && (
-                                        <p className="text-zinc-500 mt-0.5">→ {call.result_summary}</p>
+                                        <p className="text-slate-500 mt-0.5">→ {call.result_summary}</p>
                                       )}
                                     </div>
                                   </div>
@@ -384,12 +383,12 @@ export function InvestigationProgress({
 
         {/* Agent reasoning summary */}
         {status === "running" && currentNode === "llm_agent" && agentIterations > 0 && (
-          <div className="bg-purple-900/20 border border-purple-800/30 rounded-lg p-3">
-            <div className="flex items-center gap-2 text-sm text-purple-300">
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+            <div className="flex items-center gap-2 text-sm text-purple-700">
               <Brain className="w-4 h-4" />
               <span>AI Agent is analyzing...</span>
             </div>
-            <p className="text-xs text-zinc-500 mt-1">
+            <p className="text-xs text-slate-500 mt-1">
               Iteration {agentIterations}/8 • {toolCalls.length} tools called
             </p>
           </div>

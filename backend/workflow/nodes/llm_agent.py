@@ -393,37 +393,45 @@ def _build_agent_prompt(
             tool_name = msg.get("tool_name", "unknown")
             history += f"\nTool Result ({tool_name}): {msg['content'][:800]}"
     
-    prompt = f"""You are a fraud investigation agent analyzing a flagged account. Your job is to gather evidence and make a decision.
+    # Decide what the agent should do based on iteration
+    action_hint = ""
+    if iteration == 1:
+        action_hint = "Start by getting transaction history with get_transactions."
+    elif iteration >= 3 and len(tool_calls) >= 2:
+        action_hint = "You have gathered evidence. Consider submitting your assessment with submit_assessment."
+    elif iteration >= MAX_ITERATIONS - 2:
+        action_hint = "Time is running out. Submit your final assessment now with submit_assessment."
+    
+    prompt = f"""You are a fraud investigation agent. Analyze the evidence and respond with ONLY a JSON object.
 
 {evidence_summary}
 
-## AVAILABLE TOOLS
+## TOOLS AVAILABLE
 {tool_descriptions}
-
-## INSTRUCTIONS
-1. Analyze the current evidence carefully
-2. If you need more information, call a tool with appropriate parameters:
-   - For transactions: you decide how many days to look back (1-90)
-   - For graph traversal: you decide how many hops (1-4)
-   - For fraud ring analysis: use check_fraud_ring for comprehensive analysis
-3. When you have enough evidence, call submit_assessment with your decision
 
 ## CURRENT STATUS
 - Iteration: {iteration}/{MAX_ITERATIONS}
 - Tool calls made: {len(tool_calls)}/{MAX_TOOL_CALLS}
+{f"- Hint: {action_hint}" if action_hint else ""}
 
 {history}
 
-## YOUR RESPONSE
-Respond with a JSON object containing your next action:
-- To call a tool: {{"tool": "tool_name", "params": {{...}}}}
-- To submit assessment: {{"tool": "submit_assessment", "params": {{"typology": "...", "risk_level": "...", "risk_score": 0-100, "decision": "...", "reasoning": "..."}}}}
+## RESPONSE FORMAT
+You MUST respond with ONLY a valid JSON object. No other text, no explanations, just JSON.
 
-Valid typologies: account_takeover, money_mule, synthetic_identity, promo_abuse, friendly_fraud, card_testing, fraud_ring, legitimate
-Valid risk_levels: low, medium, high, critical
-Valid decisions: allow_monitor, step_up_auth, temporary_freeze, full_block, escalate_compliance
+Example tool call:
+{{"tool": "get_transactions", "params": {{"days": 30, "min_amount": 1000}}}}
 
-Think step by step about what evidence you have and what you still need. Then output your JSON response."""
+Example assessment submission:
+{{"tool": "submit_assessment", "params": {{"typology": "money_mule", "risk_level": "high", "risk_score": 85, "decision": "temporary_freeze", "reasoning": "High transaction velocity with multiple high-value transfers"}}}}
+
+Valid values:
+- typology: account_takeover, money_mule, synthetic_identity, promo_abuse, friendly_fraud, card_testing, fraud_ring, suspicious_activity, legitimate
+- risk_level: low, medium, high, critical  
+- risk_score: integer 0-100
+- decision: allow_monitor, step_up_auth, temporary_freeze, full_block, escalate_compliance
+
+YOUR JSON RESPONSE:"""
 
     return prompt
 
@@ -463,42 +471,109 @@ def _call_ollama(base_url: str, model: str, prompt: str) -> str:
 
 
 def _parse_tool_call(response: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    """Parse tool call from LLM response."""
+    """Parse tool call from LLM response with improved handling."""
     
-    # Try to extract JSON from response
-    json_match = re.search(r'\{[^{}]*"tool"[^{}]*\}', response, re.DOTALL)
-    
-    if not json_match:
-        # Try to find JSON anywhere in response
-        try:
-            # Look for any JSON object
-            start = response.find('{')
-            end = response.rfind('}') + 1
-            if start >= 0 and end > start:
-                json_str = response[start:end]
-                data = json.loads(json_str)
-                if "tool" in data:
-                    return data.get("tool"), data.get("params", {})
-        except Exception:
-            pass
-        
+    if not response:
         return None, {}
     
+    # Clean response - remove markdown code blocks if present
+    cleaned = response.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+    
+    # Strategy 1: Try direct JSON parse (if response is just JSON)
     try:
-        json_str = json_match.group()
-        # Handle nested JSON in params
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Try to fix common issues
-            json_str = json_str.replace("'", '"')
-            data = json.loads(json_str)
+        data = json.loads(cleaned)
+        if isinstance(data, dict) and "tool" in data:
+            logger.debug(f"[Parse] Strategy 1 success: {data.get('tool')}")
+            return data.get("tool"), data.get("params", {})
+    except Exception:
+        pass
+    
+    # Strategy 2: Find JSON object with balanced braces
+    try:
+        start_idx = cleaned.find('{')
+        if start_idx >= 0:
+            depth = 0
+            end_idx = start_idx
+            for i, char in enumerate(cleaned[start_idx:], start_idx):
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > start_idx:
+                json_str = cleaned[start_idx:end_idx]
+                data = json.loads(json_str)
+                if isinstance(data, dict) and "tool" in data:
+                    logger.debug(f"[Parse] Strategy 2 success: {data.get('tool')}")
+                    return data.get("tool"), data.get("params", {})
+    except Exception:
+        pass
+    
+    # Strategy 3: Regex for tool pattern with nested params
+    try:
+        # Match {"tool": "...", "params": {...}}
+        pattern = r'\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"params"\s*:\s*(\{[^}]*\}|\{\})\s*\}'
+        match = re.search(pattern, cleaned, re.DOTALL)
+        if match:
+            tool_name = match.group(1)
+            params_str = match.group(2)
+            try:
+                params = json.loads(params_str)
+            except:
+                params = {}
+            logger.debug(f"[Parse] Strategy 3 success: {tool_name}")
+            return tool_name, params
+    except Exception:
+        pass
+    
+    # Strategy 4: Look for tool name without params
+    try:
+        pattern = r'"tool"\s*:\s*"([^"]+)"'
+        match = re.search(pattern, cleaned)
+        if match:
+            tool_name = match.group(1)
+            # Try to extract params separately
+            params = {}
+            params_match = re.search(r'"params"\s*:\s*(\{[^}]*\})', cleaned)
+            if params_match:
+                try:
+                    params = json.loads(params_match.group(1))
+                except:
+                    pass
+            logger.debug(f"[Parse] Strategy 4 success: {tool_name}")
+            return tool_name, params
+    except Exception:
+        pass
+    
+    # Strategy 5: Fix common JSON issues and retry
+    try:
+        # Replace single quotes with double quotes
+        fixed = cleaned.replace("'", '"')
+        # Fix unquoted keys
+        fixed = re.sub(r'(\{|\,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1 "\2":', fixed)
         
-        return data.get("tool"), data.get("params", {})
-        
-    except Exception as e:
-        logger.warning(f"Failed to parse tool call: {e}")
-        return None, {}
+        start_idx = fixed.find('{')
+        end_idx = fixed.rfind('}') + 1
+        if start_idx >= 0 and end_idx > start_idx:
+            data = json.loads(fixed[start_idx:end_idx])
+            if isinstance(data, dict) and "tool" in data:
+                logger.debug(f"[Parse] Strategy 5 success: {data.get('tool')}")
+                return data.get("tool"), data.get("params", {})
+    except Exception:
+        pass
+    
+    logger.warning(f"[Parse] Failed to extract tool call from: {cleaned[:200]}...")
+    return None, {}
 
 
 def _deterministic_assessment(

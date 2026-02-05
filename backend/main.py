@@ -1312,3 +1312,164 @@ def get_user_investigation_history(
     except Exception as e:
         logger.error(f"❌ Failed to get user investigation history: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+
+# ============================================================================
+# DEMO / SUSPICIOUS ACTIVITY INJECTION
+# ============================================================================
+
+@app.post("/demo/inject-suspicious-activity")
+def inject_suspicious_activity(
+    transaction_count: int = Query(100, ge=10, le=10000, description="Number of transactions to create"),
+    spread_days: int = Query(30, ge=1, le=365, description="Days to spread transactions over"),
+    high_value_percentage: float = Query(10.0, ge=0, le=100, description="Percentage of high-value transactions"),
+    seed_flagged_accounts: int = Query(3, ge=0, le=20, description="Number of accounts to flag as seed")
+):
+    """
+    Inject suspicious demo activity to generate realistic fraud patterns.
+    This creates transactions spread over time with high-value outliers.
+    Separate from normal generator - does not affect regular transaction generation.
+    """
+    import random
+    import uuid
+    from datetime import datetime, timedelta
+    from gremlin_python.process.graph_traversal import __
+    
+    try:
+        logger.info(f"🚨 DEMO: Injecting suspicious activity - {transaction_count} transactions over {spread_days} days")
+        
+        # Get all accounts
+        accounts = graph_service.client.V().hasLabel("account").id_().toList()
+        if len(accounts) < 10:
+            raise HTTPException(status_code=400, detail="Not enough accounts. Need at least 10 accounts.")
+        
+        created_txns = []
+        high_value_count = int(transaction_count * high_value_percentage / 100)
+        normal_count = transaction_count - high_value_count
+        
+        # Define time spread
+        now = datetime.now()
+        
+        # Create normal transactions spread over time
+        for i in range(normal_count):
+            sender, receiver = random.sample(accounts, 2)
+            
+            # Spread timestamp over the past N days
+            days_ago = random.uniform(0, spread_days)
+            hours_offset = random.uniform(0, 24)
+            timestamp = now - timedelta(days=days_ago, hours=hours_offset)
+            
+            # Normal amount ($100 - $5,000)
+            amount = round(random.uniform(100, 5000), 2)
+            txn_type = random.choice(["transfer", "payment", "deposit", "withdrawal"])
+            
+            txn_id = str(uuid.uuid4())
+            try:
+                graph_service.client.V(sender) \
+                    .addE("TRANSACTS") \
+                    .to(__.V(receiver)) \
+                    .property("txn_id", txn_id) \
+                    .property("amount", amount) \
+                    .property("currency", "USD") \
+                    .property("type", txn_type) \
+                    .property("method", "electronic_transfer") \
+                    .property("location", random.choice(["New York, NY", "Los Angeles, CA", "Chicago, IL", "Houston, TX", "Phoenix, AZ"])) \
+                    .property("timestamp", timestamp.isoformat()) \
+                    .property("status", "completed") \
+                    .property("gen_type", "DEMO_NORMAL") \
+                    .iterate()
+                created_txns.append({"txn_id": txn_id, "amount": amount, "type": "normal"})
+            except Exception as e:
+                logger.warning(f"Error creating normal txn: {e}")
+        
+        logger.info(f"✅ Created {len(created_txns)} normal transactions")
+        
+        # Create high-value suspicious transactions (recent, high amount)
+        suspicious_accounts = random.sample(accounts, min(20, len(accounts)))
+        for i in range(high_value_count):
+            sender = random.choice(suspicious_accounts)
+            receiver = random.choice(accounts)
+            if sender == receiver:
+                continue
+            
+            # Recent timestamp (last 3 days for high-value = suspicious velocity)
+            days_ago = random.uniform(0, 3)
+            hours_offset = random.uniform(0, 12)
+            timestamp = now - timedelta(days=days_ago, hours=hours_offset)
+            
+            # High-value amount ($15,000 - $100,000)
+            amount = round(random.uniform(15000, 100000), 2)
+            txn_type = random.choice(["transfer", "wire_transfer"])
+            
+            txn_id = str(uuid.uuid4())
+            try:
+                graph_service.client.V(sender) \
+                    .addE("TRANSACTS") \
+                    .to(__.V(receiver)) \
+                    .property("txn_id", txn_id) \
+                    .property("amount", amount) \
+                    .property("currency", "USD") \
+                    .property("type", txn_type) \
+                    .property("method", "wire_transfer") \
+                    .property("location", random.choice(["Miami, FL", "Las Vegas, NV", "Atlantic City, NJ"])) \
+                    .property("timestamp", timestamp.isoformat()) \
+                    .property("status", "completed") \
+                    .property("gen_type", "DEMO_HIGH_VALUE") \
+                    .iterate()
+                created_txns.append({"txn_id": txn_id, "amount": amount, "type": "high_value"})
+            except Exception as e:
+                logger.warning(f"Error creating high-value txn: {e}")
+        
+        logger.info(f"✅ Created {high_value_count} high-value transactions")
+        
+        # Seed some flagged accounts (bootstrap the detection)
+        flagged_seeds = []
+        if seed_flagged_accounts > 0 and aerospike_service.is_connected():
+            # Find users associated with suspicious accounts
+            for acc_id in random.sample(suspicious_accounts, min(seed_flagged_accounts, len(suspicious_accounts))):
+                try:
+                    # Get user who owns this account
+                    user_id = graph_service.client.V(acc_id).in_("OWNS").id_().next()
+                    
+                    # Create flagged account record
+                    flagged_record = {
+                        "user_id": str(user_id),
+                        "flagged_at": datetime.now().isoformat(),
+                        "risk_score": random.randint(75, 95),
+                        "risk_factors": ["high_value_transaction", "demo_seed"],
+                        "status": "pending_review",
+                        "detection_method": "demo_injection"
+                    }
+                    
+                    aerospike_service.save_flagged_account(flagged_record)
+                    flagged_seeds.append(user_id)
+                    logger.info(f"✅ Seeded flagged account: {user_id}")
+                except Exception as e:
+                    logger.warning(f"Error seeding flagged account for {acc_id}: {e}")
+        
+        result = {
+            "success": True,
+            "message": f"Injected {len(created_txns)} demo transactions",
+            "details": {
+                "total_transactions": len(created_txns),
+                "normal_transactions": sum(1 for t in created_txns if t["type"] == "normal"),
+                "high_value_transactions": sum(1 for t in created_txns if t["type"] == "high_value"),
+                "spread_days": spread_days,
+                "flagged_seeds": len(flagged_seeds),
+                "flagged_user_ids": flagged_seeds
+            },
+            "next_steps": [
+                "Run 'Manual Detection' in Fraud Detection tab to detect flagged accounts",
+                "High-value transactions will increase risk scores",
+                "Seeded flagged accounts enable the 'flagged_connections' factor (30 points)"
+            ]
+        }
+        
+        logger.info(f"✅ DEMO: Injection complete - {result}")
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to inject suspicious activity: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to inject: {str(e)}")

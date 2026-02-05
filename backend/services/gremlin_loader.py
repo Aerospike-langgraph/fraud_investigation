@@ -24,6 +24,26 @@ class GremlinDataLoader:
         self.graph = graph_service
         self.batch_size = 100
         
+    def _check_data_exists(self) -> Dict[str, int]:
+        """Check if data already exists in the graph database."""
+        try:
+            user_count = self.graph.client.V().hasLabel("user").count().next()
+            account_count = self.graph.client.V().hasLabel("account").count().next()
+            device_count = self.graph.client.V().hasLabel("device").count().next()
+            owns_count = self.graph.client.E().hasLabel("OWNS").count().next()
+            uses_count = self.graph.client.E().hasLabel("USES").count().next()
+            
+            return {
+                "users": user_count,
+                "accounts": account_count,
+                "devices": device_count,
+                "owns_edges": owns_count,
+                "uses_edges": uses_count
+            }
+        except Exception as e:
+            logger.warning(f"Error checking existing data: {e}")
+            return {"users": 0, "accounts": 0, "devices": 0, "owns_edges": 0, "uses_edges": 0}
+    
     def load_all_data(self, vertices_path: str = "/data/graph_csv/vertices", 
                       edges_path: str = "/data/graph_csv/edges") -> Dict[str, Any]:
         """Load all vertices and edges from CSV files."""
@@ -31,11 +51,26 @@ class GremlinDataLoader:
             "success": True,
             "vertices": {"users": 0, "accounts": 0, "devices": 0},
             "edges": {"owns": 0, "uses": 0},
-            "errors": []
+            "errors": [],
+            "skipped": False
         }
         
         try:
-            # Load vertices
+            # Check if data already exists
+            existing = self._check_data_exists()
+            total_existing = sum(existing.values())
+            
+            if total_existing > 0:
+                logger.info(f"📊 Data already exists in graph: {existing}")
+                
+                # If we have significant data, skip loading to prevent duplicates
+                if existing["users"] >= 1000:
+                    logger.info("✅ Skipping data load - graph already has sufficient data")
+                    result["skipped"] = True
+                    result["message"] = f"Data already exists: {existing['users']} users, {existing['accounts']} accounts, {existing['devices']} devices"
+                    return result
+            
+            # Load vertices (these have upsert logic)
             logger.info("Loading users...")
             result["vertices"]["users"] = self._load_users(f"{vertices_path}/users/users.csv")
             
@@ -45,14 +80,14 @@ class GremlinDataLoader:
             logger.info("Loading devices...")
             result["vertices"]["devices"] = self._load_devices(f"{vertices_path}/devices/devices.csv")
             
-            # Load edges
+            # Load edges (with duplicate checking)
             logger.info("Loading OWNS edges...")
             result["edges"]["owns"] = self._load_owns_edges(f"{edges_path}/ownership/owns.csv")
             
             logger.info("Loading USES edges...")
             result["edges"]["uses"] = self._load_uses_edges(f"{edges_path}/usage/uses.csv")
             
-            logger.info(f"Data loading complete: {result}")
+            logger.info(f"✅ Data loading complete: {result}")
             
         except Exception as e:
             logger.error(f"Error loading data: {e}")
@@ -257,11 +292,12 @@ class GremlinDataLoader:
                 logger.warning(f"Error inserting device {device['id']}: {e}")
     
     def _load_owns_edges(self, csv_path: str) -> int:
-        """Load OWNS edges from CSV."""
+        """Load OWNS edges from CSV (skip if edge already exists)."""
         if not self.graph.client:
             raise Exception("Graph client not available")
             
         count = 0
+        skipped = 0
         errors = 0
         try:
             with open(csv_path, 'r') as f:
@@ -273,14 +309,24 @@ class GremlinDataLoader:
                     
                     if from_id and to_id:
                         try:
-                            # Use __.V() for the target vertex in addE().to()
+                            # Check if edge already exists between these vertices
+                            edge_exists = self.graph.client.V(from_id) \
+                                .outE("OWNS") \
+                                .where(__.inV().hasId(to_id)) \
+                                .hasNext()
+                            
+                            if edge_exists:
+                                skipped += 1
+                                continue  # Skip duplicate edge
+                            
+                            # Create edge only if it doesn't exist
                             self.graph.client.V(from_id) \
                                 .addE("OWNS") \
                                 .to(__.V(to_id)) \
                                 .iterate()
                             count += 1
                             if count % 5000 == 0:
-                                logger.info(f"Loaded {count} OWNS edges...")
+                                logger.info(f"Loaded {count} OWNS edges (skipped {skipped} existing)...")
                         except Exception as e:
                             errors += 1
                             if errors <= 5:
@@ -290,17 +336,20 @@ class GremlinDataLoader:
             logger.error(f"Error loading OWNS edges: {e}")
             raise
         
+        if skipped > 0:
+            logger.info(f"OWNS edges: {count} created, {skipped} skipped (already existed)")
         if errors > 0:
             logger.warning(f"OWNS edges: {count} loaded, {errors} errors")
             
         return count
     
     def _load_uses_edges(self, csv_path: str) -> int:
-        """Load USES edges from CSV."""
+        """Load USES edges from CSV (skip if edge already exists)."""
         if not self.graph.client:
             raise Exception("Graph client not available")
             
         count = 0
+        skipped = 0
         errors = 0
         try:
             with open(csv_path, 'r') as f:
@@ -312,14 +361,24 @@ class GremlinDataLoader:
                     
                     if from_id and to_id:
                         try:
-                            # Use __.V() for the target vertex in addE().to()
+                            # Check if edge already exists between these vertices
+                            edge_exists = self.graph.client.V(from_id) \
+                                .outE("USES") \
+                                .where(__.inV().hasId(to_id)) \
+                                .hasNext()
+                            
+                            if edge_exists:
+                                skipped += 1
+                                continue  # Skip duplicate edge
+                            
+                            # Create edge only if it doesn't exist
                             self.graph.client.V(from_id) \
                                 .addE("USES") \
                                 .to(__.V(to_id)) \
                                 .iterate()
                             count += 1
                             if count % 5000 == 0:
-                                logger.info(f"Loaded {count} USES edges...")
+                                logger.info(f"Loaded {count} USES edges (skipped {skipped} existing)...")
                         except Exception as e:
                             errors += 1
                             if errors <= 5:
@@ -329,6 +388,8 @@ class GremlinDataLoader:
             logger.error(f"Error loading USES edges: {e}")
             raise
         
+        if skipped > 0:
+            logger.info(f"USES edges: {count} created, {skipped} skipped (already existed)")
         if errors > 0:
             logger.warning(f"USES edges: {count} loaded, {errors} errors")
             

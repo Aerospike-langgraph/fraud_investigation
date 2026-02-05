@@ -487,25 +487,32 @@ class FlaggedAccountService:
                 g = self.graph_service.client
                 
                 try:
-                    # Get user's accounts and their transaction stats
+                    # Get user's accounts IDs (not Vertex objects)
                     # Note: user_id is the actual vertex ID (e.g., "U0001")
-                    user_accounts = g.V(user_id).out("OWNS").toList()
+                    account_ids = g.V(user_id).out("OWNS").id_().toList()
                     
-                    for account in user_accounts:
-                        # Get transaction counts (simpler query that works)
-                        out_count = g.V(account).outE("TRANSACTS").count().next()
-                        in_count = g.V(account).inE("TRANSACTS").count().next()
+                    for acc_id in account_ids:
+                        # Get transaction counts
+                        out_count = g.V(acc_id).outE("TRANSACTS").count().next()
+                        in_count = g.V(acc_id).inE("TRANSACTS").count().next()
                         features["transaction_count"] += out_count + in_count
                         
-                        # Get transaction amounts
+                        # Get transaction amounts using fold() (sum() doesn't work with Aerospike Graph)
                         try:
-                            out_amount = g.V(account).outE("TRANSACTS").values("amount").sum().next()
-                            features["total_amount"] += float(out_amount) if out_amount else 0
-                        except:
-                            pass
+                            out_amounts = g.V(acc_id).outE("TRANSACTS").values("amount").fold().next()
+                            features["total_amount"] += sum(float(a) for a in out_amounts) if out_amounts else 0
+                        except Exception as e:
+                            logger.debug(f"Error getting out amounts for {acc_id}: {e}")
                         try:
-                            in_amount = g.V(account).inE("TRANSACTS").values("amount").sum().next()
-                            features["total_amount"] += float(in_amount) if in_amount else 0
+                            in_amounts = g.V(acc_id).inE("TRANSACTS").values("amount").fold().next()
+                            features["total_amount"] += sum(float(a) for a in in_amounts) if in_amounts else 0
+                        except Exception as e:
+                            logger.debug(f"Error getting in amounts for {acc_id}: {e}")
+                        
+                        # Count high-value transactions (> $10,000)
+                        try:
+                            all_amounts = g.V(acc_id).bothE("TRANSACTS").values("amount").fold().next()
+                            features["high_value_txn_count"] += sum(1 for a in all_amounts if float(a) > 10000)
                         except:
                             pass
                     
@@ -515,6 +522,16 @@ class FlaggedAccountService:
                     
                     # Get device count
                     features["device_count"] = g.V(user_id).out("USES").count().next()
+                    
+                    # Count unique recipients (accounts this user sent money to)
+                    try:
+                        recipients = set()
+                        for acc_id in account_ids:
+                            recipient_ids = g.V(acc_id).outE("TRANSACTS").inV().id_().toList()
+                            recipients.update(recipient_ids)
+                        features["unique_recipients"] = len(recipients)
+                    except:
+                        pass
                     
                 except Exception as e:
                     logger.warning(f"Error getting graph features for user {user_id}: {e}")

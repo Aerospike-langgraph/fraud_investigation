@@ -83,6 +83,13 @@ const DataManagement = () => {
     const [useDefaultData, setUseDefaultData] = useState(true)
     const [uploadedFile, setUploadedFile] = useState<File | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
+    
+    // Demo injection state
+    const [demoLoading, setDemoLoading] = useState(false)
+    const [demoTxnCount, setDemoTxnCount] = useState(500)
+    const [demoSpreadDays, setDemoSpreadDays] = useState(30)
+    const [demoHighValuePct, setDemoHighValuePct] = useState(15)
+    const [demoSeedFlagged, setDemoSeedFlagged] = useState(5)
 
     // Fetch current graph statistics
     const fetchGraphStats = async () => {
@@ -312,6 +319,41 @@ const DataManagement = () => {
             toast.error('Failed to check status')
         } finally {
             setLoadingStats(false)
+        }
+    }
+
+    // Inject demo suspicious activity
+    const handleInjectDemoActivity = async () => {
+        setDemoLoading(true)
+        try {
+            const params = new URLSearchParams({
+                transaction_count: String(demoTxnCount),
+                spread_days: String(demoSpreadDays),
+                high_value_percentage: String(demoHighValuePct),
+                seed_flagged_accounts: String(demoSeedFlagged)
+            })
+            
+            const response = await fetch(`/api/demo/inject-suspicious-activity?${params.toString()}`, {
+                method: 'POST'
+            })
+            
+            const data = await response.json()
+            
+            if (data.success) {
+                toast.success(`Injected ${data.details.total_transactions} demo transactions!`)
+                toast.info(`${data.details.high_value_transactions} high-value, ${data.details.flagged_seeds} flagged seeds`)
+                
+                // Refresh stats
+                await fetchGraphStats()
+                await fetchAerospikeStats()
+            } else {
+                toast.error(data.detail || 'Failed to inject demo activity')
+            }
+        } catch (error) {
+            console.error('Failed to inject demo activity:', error)
+            toast.error('Failed to inject demo activity')
+        } finally {
+            setDemoLoading(false)
         }
     }
 
@@ -601,6 +643,106 @@ const DataManagement = () => {
                             )}
                         </Button>
                     </div>
+                </CardContent>
+            </Card>
+
+            {/* Demo Activity Injection */}
+            <Card className="md:col-span-2 border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20">
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                        <AlertTriangle className="h-5 w-5 text-amber-500" />
+                        Inject Demo Activity
+                        <span className="ml-auto text-xs font-normal text-amber-600 bg-amber-100 dark:bg-amber-900/30 px-2 py-1 rounded">
+                            Demo Only
+                        </span>
+                    </CardTitle>
+                    <CardDescription>
+                        Create realistic fraud patterns with spread timestamps, high-value transactions, and seed flagged accounts.
+                        This helps bootstrap the fraud detection system with meaningful data.
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="txn-count" className="text-sm font-medium">Transactions</Label>
+                            <input
+                                id="txn-count"
+                                type="number"
+                                min={10}
+                                max={10000}
+                                value={demoTxnCount}
+                                onChange={(e) => setDemoTxnCount(Number(e.target.value))}
+                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
+                            />
+                            <p className="text-xs text-muted-foreground">10 - 10,000</p>
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="spread-days" className="text-sm font-medium">Spread (Days)</Label>
+                            <input
+                                id="spread-days"
+                                type="number"
+                                min={1}
+                                max={365}
+                                value={demoSpreadDays}
+                                onChange={(e) => setDemoSpreadDays(Number(e.target.value))}
+                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
+                            />
+                            <p className="text-xs text-muted-foreground">1 - 365 days</p>
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="high-value-pct" className="text-sm font-medium">High Value %</Label>
+                            <input
+                                id="high-value-pct"
+                                type="number"
+                                min={0}
+                                max={100}
+                                value={demoHighValuePct}
+                                onChange={(e) => setDemoHighValuePct(Number(e.target.value))}
+                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
+                            />
+                            <p className="text-xs text-muted-foreground">$15K-$100K txns</p>
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="seed-flagged" className="text-sm font-medium">Seed Flagged</Label>
+                            <input
+                                id="seed-flagged"
+                                type="number"
+                                min={0}
+                                max={20}
+                                value={demoSeedFlagged}
+                                onChange={(e) => setDemoSeedFlagged(Number(e.target.value))}
+                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
+                            />
+                            <p className="text-xs text-muted-foreground">0 - 20 accounts</p>
+                        </div>
+                    </div>
+                    
+                    <div className="p-3 bg-amber-100 dark:bg-amber-900/30 rounded-lg text-sm">
+                        <p className="font-medium text-amber-800 dark:text-amber-200 mb-1">What this does:</p>
+                        <ul className="text-amber-700 dark:text-amber-300 space-y-1 list-disc list-inside text-xs">
+                            <li><strong>Normal transactions</strong> ($100-$5K) spread over {demoSpreadDays} days</li>
+                            <li><strong>High-value transactions</strong> ($15K-$100K) in last 3 days → triggers velocity alerts</li>
+                            <li><strong>Seed flagged accounts</strong> → enables "flagged_connections" factor (30 pts)</li>
+                        </ul>
+                    </div>
+                    
+                    <Button
+                        onClick={handleInjectDemoActivity}
+                        disabled={demoLoading}
+                        className="w-full bg-amber-600 hover:bg-amber-700 text-white"
+                    >
+                        {demoLoading ? (
+                            <>
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                Injecting Demo Activity...
+                            </>
+                        ) : (
+                            <>
+                                <Play className="h-4 w-4 mr-2" />
+                                Inject {demoTxnCount} Demo Transactions
+                            </>
+                        )}
+                    </Button>
                 </CardContent>
             </Card>
 

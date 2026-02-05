@@ -173,12 +173,37 @@ export function useAccountData(userId: string): UseAccountDataReturn {
             
             // Extract data from user summary
             const user = userSummary.user || {}
-            const accounts: Account[] = userSummary.accounts || []
-            const devices = userSummary.devices || []
-            const transactions = userSummary.txns || []
+            const rawAccounts: Account[] = userSummary.accounts || []
+            const rawDevices = userSummary.devices || []
+            const rawTransactions = userSummary.txns || []
             
             // Helper to get ID from various formats (API returns "1" for ID in graph objects)
             const getId = (obj: any): string => obj?.id || obj?.['1'] || obj?.['~id'] || 'Unknown'
+            
+            // Deduplication helper - removes duplicate items by ID
+            const deduplicateById = <T extends Record<string, any>>(arr: T[]): T[] => {
+                const seen = new Set<string>()
+                return arr.filter(item => {
+                    const id = getId(item)
+                    if (seen.has(id)) return false
+                    seen.add(id)
+                    return true
+                })
+            }
+            
+            // Deduplicate accounts, devices, and transactions (fixes duplicate edges issue in DB)
+            const accounts = deduplicateById(rawAccounts)
+            const devices = deduplicateById(rawDevices)
+            
+            // For transactions, deduplicate by transaction ID
+            const transactions = rawTransactions.filter((txn: any, idx: number, arr: any[]) => {
+                const txnData = txn.txn || txn
+                const txnId = txnData.txn_id || getId(txnData)
+                return arr.findIndex((t: any) => {
+                    const tData = t.txn || t
+                    return (tData.txn_id || getId(tData)) === txnId
+                }) === idx
+            })
             
             // Get primary account info
             const primaryAccount = accounts[0] || { type: 'Unknown', balance: 0, created_at: '', '1': '' }
@@ -394,14 +419,48 @@ export function useGraphData(userId: string) {
             // Helper to get ID from various formats
             const getId = (obj: any): string => obj?.id || obj?.['1'] || obj?.['~id'] || 'Unknown'
             
+            // DEDUPLICATE arrays by ID (fixes duplicate edges issue in database)
+            const deduplicateById = (arr: any[]): any[] => {
+                const seen = new Set<string>()
+                return arr.filter(item => {
+                    const id = getId(item)
+                    if (seen.has(id)) return false
+                    seen.add(id)
+                    return true
+                })
+            }
+            
+            // Deduplicate accounts and devices
+            const uniqueAccounts = deduplicateById(accounts)
+            const uniqueDevices = deduplicateById(devices)
+            
             // Build graph nodes
             const nodes: any[] = []
             const edges: any[] = []
+            const nodeIds = new Set<string>() // Track added node IDs
+            const edgeKeys = new Set<string>() // Track added edges to prevent duplicates
             const centerX = 400
             const centerY = 300
             
+            // Helper to add node only if not already added
+            const addNode = (node: any) => {
+                if (!nodeIds.has(node.id)) {
+                    nodeIds.add(node.id)
+                    nodes.push(node)
+                }
+            }
+            
+            // Helper to add edge only if not already added
+            const addEdge = (edge: any) => {
+                const key = `${edge.source}-${edge.type}-${edge.target}`
+                if (!edgeKeys.has(key)) {
+                    edgeKeys.add(key)
+                    edges.push(edge)
+                }
+            }
+            
             // Add central user node
-            nodes.push({
+            addNode({
                 id: userId,
                 label: `${user.name || 'User'}\n${userId}`,
                 type: 'user',
@@ -417,12 +476,12 @@ export function useGraphData(userId: string) {
                 }
             })
             
-            // Add account nodes
-            accounts.forEach((acc: any, idx: number) => {
+            // Add account nodes (using deduplicated array)
+            uniqueAccounts.forEach((acc: any, idx: number) => {
                 const accId = getId(acc)
-                const angle = (idx * 2 * Math.PI) / Math.max(accounts.length, 1) - Math.PI / 2
-                const radius = 120
-                nodes.push({
+                const angle = (idx * 2 * Math.PI) / Math.max(uniqueAccounts.length, 1) - Math.PI / 2
+                const radius = 140
+                addNode({
                     id: accId,
                     label: `${acc.type}\n${accId}`,
                     type: 'account',
@@ -436,7 +495,7 @@ export function useGraphData(userId: string) {
                     }
                 })
                 
-                edges.push({
+                addEdge({
                     source: userId,
                     target: accId,
                     type: 'owns',
@@ -444,17 +503,17 @@ export function useGraphData(userId: string) {
                 })
             })
             
-            // Add device nodes
-            devices.forEach((dev: any, idx: number) => {
+            // Add device nodes (using deduplicated array with better positioning)
+            uniqueDevices.forEach((dev: any, idx: number) => {
                 const devId = getId(dev)
-                const angle = (idx * 2 * Math.PI) / Math.max(devices.length, 1)
-                const radius = 180
-                nodes.push({
+                const angle = (idx * 2 * Math.PI) / Math.max(uniqueDevices.length, 1) + Math.PI
+                const radius = 160
+                addNode({
                     id: devId,
                     label: `${dev.type}\n${dev.os}`,
                     type: 'device',
-                    x: centerX - 150 + Math.cos(angle) * 80,
-                    y: centerY + 100 + Math.sin(angle) * 60,
+                    x: centerX + Math.cos(angle) * radius,
+                    y: centerY + Math.sin(angle) * radius,
                     risk: dev.fraud_flag ? 'high' : undefined,
                     details: {
                         'Device': dev.type,
@@ -465,7 +524,7 @@ export function useGraphData(userId: string) {
                     }
                 })
                 
-                edges.push({
+                addEdge({
                     source: userId,
                     target: devId,
                     type: 'uses',
@@ -473,16 +532,16 @@ export function useGraphData(userId: string) {
                 })
             })
             
-            // Add connected users (1-hop)
-            connectedUsers.slice(0, 10).forEach((conn: any, idx: number) => {
-                const angle = (idx * Math.PI) / Math.max(connectedUsers.length - 1, 1) - Math.PI / 4
-                const radius = 250
-                nodes.push({
+            // Add connected users (1-hop) - filter out self
+            const uniqueConnected = connectedUsers.filter((c: any) => c.user_id !== userId).slice(0, 10)
+            uniqueConnected.forEach((conn: any, idx: number) => {
+                const angle = (idx * Math.PI) / Math.max(uniqueConnected.length - 1, 1) - Math.PI / 4
+                addNode({
                     id: conn.user_id,
                     label: `${conn.name || 'User'}\n${conn.user_id}`,
                     type: 'user',
-                    x: centerX + 180 + Math.cos(angle) * 100,
-                    y: centerY - 50 + Math.sin(angle) * 100,
+                    x: centerX + 220 + Math.cos(angle) * 80,
+                    y: centerY - 30 + Math.sin(angle) * 80,
                     risk: conn.risk_score >= 70 ? 'high' : conn.risk_score >= 40 ? 'medium' : 'low',
                     details: {
                         'User ID': conn.user_id,
@@ -495,8 +554,8 @@ export function useGraphData(userId: string) {
                 // Connect via shared devices
                 if (conn.shared_devices && conn.shared_devices.length > 0) {
                     conn.shared_devices.forEach((devId: string) => {
-                        if (nodes.some(n => n.id === devId)) {
-                            edges.push({
+                        if (nodeIds.has(devId)) {
+                            addEdge({
                                 source: devId,
                                 target: conn.user_id,
                                 type: 'uses'
@@ -505,7 +564,7 @@ export function useGraphData(userId: string) {
                     })
                 } else {
                     // Direct connection line
-                    edges.push({
+                    addEdge({
                         source: userId,
                         target: conn.user_id,
                         type: 'connected',
@@ -518,13 +577,13 @@ export function useGraphData(userId: string) {
             transactions.slice(0, 5).forEach((txn: any, idx: number) => {
                 const otherParty = txn.other_party
                 const otherPartyId = getId(otherParty)
-                if (otherParty && otherPartyId !== 'Unknown' && !nodes.some(n => n.id === otherPartyId)) {
-                    nodes.push({
+                if (otherParty && otherPartyId !== 'Unknown') {
+                    addNode({
                         id: otherPartyId,
                         label: `${otherParty.name || 'User'}\n${otherPartyId}`,
                         type: 'user',
-                        x: centerX + 200 + idx * 40,
-                        y: centerY + 80 + idx * 30,
+                        x: centerX + 200 + idx * 50,
+                        y: centerY + 100 + idx * 40,
                         risk: (otherParty.risk_score || 0) >= 70 ? 'high' : 
                               (otherParty.risk_score || 0) >= 40 ? 'medium' : 'low',
                         details: {
@@ -535,8 +594,8 @@ export function useGraphData(userId: string) {
                     })
                     
                     // Find user's account and connect
-                    const sourceAccount = getId(accounts[0]) || userId
-                    edges.push({
+                    const sourceAccount = getId(uniqueAccounts[0]) || userId
+                    addEdge({
                         source: sourceAccount,
                         target: otherPartyId,
                         type: 'transaction',
