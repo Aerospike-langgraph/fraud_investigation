@@ -23,6 +23,8 @@ from services.scheduler_service import scheduler_service
 from services.aerospike_service import aerospike_service
 from services.investigation_service import InvestigationService
 from services.gremlin_loader import GremlinDataLoader
+from services.feature_service import FeatureService
+from services.transaction_injector import TransactionInjector
 
 from logging_config import setup_logging, get_logger
 
@@ -36,13 +38,15 @@ fraud_service = FraudService(graph_service)
 transaction_generator = TransactionGeneratorService(graph_service, fraud_service)
 flagged_account_service = FlaggedAccountService(graph_service)
 investigation_service: Optional[InvestigationService] = None
+feature_service: Optional[FeatureService] = None
+transaction_injector: Optional[TransactionInjector] = None
 
 # Configuration variables
 max_generation_rate = 50  # Default max rate, can be changed via API
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global investigation_service
+    global investigation_service, feature_service, transaction_injector
     
     # Startup
     logger.info("Starting Fraud Detection API")
@@ -53,6 +57,15 @@ async def lifespan(app: FastAPI):
         logger.info("Aerospike KV service connected")
         # Update flagged account service to use Aerospike
         flagged_account_service.set_aerospike_service(aerospike_service)
+        
+        # Initialize feature service
+        feature_service = FeatureService(aerospike_service, graph_service)
+        flagged_account_service.set_feature_service(feature_service)
+        logger.info("Feature service initialized")
+        
+        # Initialize transaction injector
+        transaction_injector = TransactionInjector(graph_service, aerospike_service)
+        logger.info("Transaction injector initialized")
     else:
         logger.warning("Aerospike KV service not available, using file-based storage")
     
@@ -705,17 +718,20 @@ def get_bulk_load_status():
 def bulk_load_gremlin_data(
     vertices_path: Optional[str] = None,
     edges_path: Optional[str] = None,
-    load_aerospike: bool = True
+    sync_kv: bool = True
 ):
     """
     Load data using Gremlin queries (bypasses buggy Aerospike Graph bulk loader).
     
-    This method correctly loads vertices and edges with proper labels and properties.
+    This method:
+    - Loads vertices and edges to graph with correct labels
+    - Drops fraud_flag on load (flags are computed by ML)
+    - Syncs data to KV store (users with nested accounts/devices maps)
     """
     result = {
         "success": True,
         "graph": None,
-        "aerospike": None,
+        "kv_sync": None,
         "message": ""
     }
     
@@ -726,38 +742,149 @@ def bulk_load_gremlin_data(
         if not edges_path:
             edges_path = "/data/graph_csv/edges"
         
-        # Use Gremlin loader
-        loader = GremlinDataLoader(graph_service)
-        graph_result = loader.load_all_data(vertices_path, edges_path)
+        # Use Gremlin loader with KV sync
+        kv_service = aerospike_service if aerospike_service.is_connected() else None
+        loader = GremlinDataLoader(graph_service, kv_service)
+        graph_result = loader.load_all_data(vertices_path, edges_path, sync_kv=sync_kv)
         result["graph"] = graph_result
+        result["kv_sync"] = graph_result.get("kv_sync")
         
         if not graph_result["success"]:
             result["success"] = False
             result["message"] = f"Gremlin load failed: {graph_result.get('errors', [])}"
         
-        # Load users to Aerospike KV
-        if load_aerospike:
-            if aerospike_service.is_connected():
-                users_csv_path = f"{vertices_path}/users/users.csv"
-                aerospike_result = aerospike_service.load_users_from_csv(users_csv_path)
-                result["aerospike"] = aerospike_result
-            else:
-                result["aerospike"] = {
-                    "success": False,
-                    "message": "Aerospike KV service not available",
-                    "loaded": 0
-                }
-        
         # Build message
         if result["success"]:
             v = graph_result.get("vertices", {})
-            result["message"] = f"Loaded {v.get('users', 0)} users, {v.get('accounts', 0)} accounts, {v.get('devices', 0)} devices"
+            kv = graph_result.get("kv_sync", {})
+            result["message"] = (f"Graph: {v.get('users', 0)} users, {v.get('accounts', 0)} accounts, "
+                               f"{v.get('devices', 0)} devices. KV: {kv.get('users', 0)} users synced.")
         
         return result
         
     except Exception as e:
         logger.error(f"Gremlin bulk load failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load data: {str(e)}")
+
+
+@app.post("/inject-historical-transactions")
+def inject_historical_transactions(
+    transaction_count: int = Query(10000, ge=100, le=100000, description="Total transactions to generate"),
+    spread_days: int = Query(30, ge=1, le=365, description="Days to spread transactions over"),
+    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions")
+):
+    """
+    Inject historical transactions with fraud patterns for testing.
+    
+    Transactions are written to both Graph (TRANSACTS edges) and KV (transactions set).
+    Includes fraud patterns:
+    - Fraud rings (40%): Tight-knit groups with high velocity
+    - Velocity anomalies (25%): Single accounts with burst activity  
+    - Amount anomalies (20%): High-value outlier transactions
+    - New account fraud (15%): Immediate activity after creation
+    """
+    if not transaction_injector:
+        raise HTTPException(status_code=503, detail="Transaction injector not available. Aerospike may not be connected.")
+    
+    try:
+        result = transaction_injector.inject_historical_transactions(
+            transaction_count=transaction_count,
+            spread_days=spread_days,
+            fraud_percentage=fraud_percentage
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Transaction injection failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to inject transactions: {str(e)}")
+
+
+@app.post("/compute-features")
+def compute_features(
+    window_days: int = Query(7, ge=1, le=90, description="Sliding window in days")
+):
+    """
+    Compute account and device features from transaction data.
+    
+    This runs the feature computation job which:
+    - Reads transactions from KV transactions set
+    - Computes 15 account features and 5 device features
+    - Stores results in account-fact and device-fact sets
+    
+    Should be run before ML detection for accurate scoring.
+    """
+    if not feature_service:
+        raise HTTPException(status_code=503, detail="Feature service not available. Aerospike may not be connected.")
+    
+    try:
+        result = feature_service.run_feature_computation_job(window_days=window_days)
+        return result
+    except Exception as e:
+        logger.error(f"Feature computation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compute features: {str(e)}")
+
+
+@app.delete("/delete-all-data")
+def delete_all_data(confirm: bool = Query(False, description="Must be True to confirm deletion")):
+    """
+    Delete all data from both Graph and KV stores.
+    
+    This is a destructive operation that:
+    - Truncates all KV sets (users, transactions, account-fact, device-fact, flagged_accounts)
+    - Drops all graph vertices (which also removes edges)
+    
+    Use with caution!
+    """
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Must set confirm=True to delete all data")
+    
+    result = {
+        "kv_truncated": {},
+        "graph_cleared": False,
+        "errors": []
+    }
+    
+    try:
+        # Truncate KV sets
+        if aerospike_service.is_connected():
+            result["kv_truncated"] = aerospike_service.truncate_all_data()
+            logger.info(f"KV sets truncated: {result['kv_truncated']}")
+        else:
+            result["errors"].append("Aerospike not connected")
+        
+        # Clear graph
+        if graph_service.client:
+            try:
+                graph_service.client.V().drop().iterate()
+                result["graph_cleared"] = True
+                logger.info("Graph vertices dropped")
+            except Exception as e:
+                result["errors"].append(f"Graph drop failed: {str(e)}")
+        else:
+            result["errors"].append("Graph not connected")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Delete all data failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete data: {str(e)}")
+
+
+@app.get("/kv-stats")
+def get_kv_stats():
+    """
+    Get statistics about data stored in KV sets.
+    
+    Returns counts for:
+    - users
+    - flagged_accounts
+    - account_facts
+    - device_facts
+    - transaction_records
+    """
+    if not aerospike_service.is_connected():
+        raise HTTPException(status_code=503, detail="Aerospike not connected")
+    
+    return aerospike_service.get_stats()
 
 
 @app.post("/bulk-load-upload")

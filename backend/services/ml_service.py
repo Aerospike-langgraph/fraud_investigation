@@ -1,156 +1,345 @@
 """
-ML Model Placeholder Service
+Rule-Based ML Model Service
 
-This is a placeholder service that simulates ML model predictions for fraud risk scoring.
-Replace this with actual ML model integration when ready.
+This service implements rule-based fraud risk scoring at the ACCOUNT level.
+It uses pre-computed features from the account-fact and device-fact KV sets.
+
+Score Calculation (max 115 points, normalized to 0-100):
+  - Velocity signals (max 30 pts)
+  - Amount signals (max 25 pts)  
+  - Counterparty signals (max 25 pts)
+  - Device signals (max 15 pts)
+  - Lifecycle signals (max 20 pts)
+
+User Risk = max(account_risks)
+Flag if User Risk >= 70
+
+Device Flagging:
+  - watchlist if: shared_account_count >= 3 AND avg_account_risk >= 70
+  - fraud if: flagged_account_count >= 2
 """
 
 import logging
-import random
-from typing import Dict, Any
 from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger('fraud_detection.ml')
 
 
 class MLModelService:
     """
-    Placeholder ML Model Service for fraud risk prediction.
-    
-    This service simulates risk scoring based on account features.
-    Replace the predict_risk method with actual ML model calls when integrating
-    with a real ML service.
+    Rule-based ML Model Service for fraud risk prediction at account level.
     """
     
     def __init__(self):
-        self.model_version = "placeholder-v1.0"
+        self.model_version = "rules-v2.0"
         self.last_prediction_time = None
         
-    def predict_risk(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        # Configurable thresholds (calibrated for generated transaction data)
+        self.thresholds = {
+            # Velocity thresholds (lowered - generated data has high velocity)
+            'txn_out_high': 100,           # Was 50, but many accounts have 1000+ txns
+            'txn_24h_peak_high': 50,       # Was 20
+            'txn_zscore_high': 3.0,        # Was 2.0, z-scores are often huge
+            
+            # Amount thresholds (lowered - generated txns max at ~$10k)
+            'max_out_amt_high': 8000,      # Was 15000
+            'avg_out_amt_high': 3000,      # Was 5000
+            'amt_zscore_high': 3.0,        # Was 2.0
+            
+            # Counterparty thresholds (lowered - generated data has ~5 recipients)
+            'unique_recipients_high': 10,  # Was 30
+            'new_recipient_ratio_high': 0.8, # Was 0.7
+            'recipient_entropy_high': 2.0, # Was 3.0
+            
+            # Device thresholds (lowered)
+            'device_count_high': 2,        # Was 3
+            'shared_device_count_high': 3, # Was 5
+            
+            # Lifecycle thresholds
+            'new_account_days': 30,
+            'new_account_txn_threshold': 10,
+            'first_txn_delay_suspicious': 1,
+            
+            # User flagging threshold (lowered for demo)
+            'flag_threshold': 50,          # Was 70
+            
+            # Device flagging thresholds
+            'device_watchlist_shared': 3,
+            'device_watchlist_risk': 50,   # Was 70
+            'device_fraud_flagged_count': 2,
+        }
+        
+        # Max points per category (total 115, normalized to 100)
+        self.max_points = {
+            'velocity': 30,
+            'amount': 25,
+            'counterparty': 25,
+            'device': 15,
+            'lifecycle': 20,
+        }
+    
+    def predict_account_risk(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Predict fraud risk score for an account based on its features.
+        Predict fraud risk score for an ACCOUNT based on its computed features.
         
         Args:
-            features: Dictionary containing account features:
-                - transaction_count: Number of transactions
-                - total_amount: Total transaction amount
-                - avg_amount: Average transaction amount
-                - device_count: Number of devices used
-                - unique_recipients: Number of unique transaction recipients
-                - flagged_connections: Number of connections to flagged accounts
-                - account_age_days: Age of the account in days
-                - high_value_txn_count: Number of high-value transactions
+            features: Dictionary containing account-fact features:
+                - txn_out_7d, txn_24h_peak, avg_txn_day, max_txn_hr, txn_zscore
+                - out_amt_7d, avg_out_amt, max_out_amt, amt_zscore
+                - uniq_recip, new_recip_rat, recip_entropy
+                - dev_count, shared_dev_ct
+                - acct_age_days, first_txn_dly
                 
         Returns:
             Dictionary containing:
                 - risk_score: Float 0-100
                 - risk_factors: List of contributing factors
-                - confidence: Model confidence score
+                - category_scores: Breakdown by category
+                - confidence: Model confidence
         """
         self.last_prediction_time = datetime.now()
         
-        # Extract features with defaults
-        txn_count = features.get('transaction_count', 0)
-        total_amount = features.get('total_amount', 0)
-        avg_amount = features.get('avg_amount', 0)
-        device_count = features.get('device_count', 1)
-        unique_recipients = features.get('unique_recipients', 0)
-        flagged_connections = features.get('flagged_connections', 0)
-        account_age_days = features.get('account_age_days', 365)
-        high_value_txn_count = features.get('high_value_txn_count', 0)
-        
-        # Calculate risk score based on various factors (placeholder logic)
-        risk_score = 0.0
         risk_factors = []
+        category_scores = {
+            'velocity': 0,
+            'amount': 0,
+            'counterparty': 0,
+            'device': 0,
+            'lifecycle': 0,
+        }
         
-        # Factor 1: High transaction velocity
-        if txn_count > 50:
-            velocity_score = min(20, (txn_count - 50) * 0.5)
-            risk_score += velocity_score
-            if velocity_score > 10:
-                risk_factors.append(f"High transaction velocity ({txn_count} transactions)")
+        # A. Velocity signals (max 30 pts)
+        txn_out = features.get('txn_out_7d', 0) or 0
+        txn_24h_peak = features.get('txn_24h_peak', 0) or 0
+        txn_zscore = features.get('txn_zscore', 0) or 0
         
-        # Factor 2: High average transaction amount
-        if avg_amount > 5000:
-            amount_score = min(20, (avg_amount - 5000) / 500)
-            risk_score += amount_score
-            if amount_score > 10:
-                risk_factors.append(f"High average transaction amount (${avg_amount:,.2f})")
+        if txn_out > self.thresholds['txn_out_high']:
+            category_scores['velocity'] += 15
+            risk_factors.append(f"High transaction count ({txn_out} in 7d)")
         
-        # Factor 3: Multiple devices
-        if device_count > 3:
-            device_score = min(15, (device_count - 3) * 3)
-            risk_score += device_score
-            if device_score > 5:
-                risk_factors.append(f"Multiple devices used ({device_count} devices)")
+        if txn_24h_peak > self.thresholds['txn_24h_peak_high']:
+            category_scores['velocity'] += 10
+            risk_factors.append(f"High 24h burst ({txn_24h_peak} transactions)")
         
-        # Factor 4: Connections to flagged accounts (high weight)
-        if flagged_connections > 0:
-            flagged_score = min(30, flagged_connections * 10)
-            risk_score += flagged_score
-            risk_factors.append(f"Connected to {flagged_connections} flagged account(s)")
+        if txn_zscore > self.thresholds['txn_zscore_high']:
+            category_scores['velocity'] += 5
+            risk_factors.append(f"Unusual transaction velocity (z={txn_zscore:.1f})")
         
-        # Factor 5: New account with high activity
-        if account_age_days < 30 and txn_count > 20:
-            new_account_score = min(15, 15 - (account_age_days / 2))
-            risk_score += new_account_score
-            risk_factors.append(f"New account with high activity ({account_age_days} days old)")
+        # B. Amount signals (max 25 pts)
+        max_out_amt = features.get('max_out_amt', 0) or 0
+        avg_out_amt = features.get('avg_out_amt', 0) or 0
+        amt_zscore = features.get('amt_zscore', 0) or 0
         
-        # Factor 6: High value transactions
-        if high_value_txn_count > 5:
-            high_value_score = min(15, high_value_txn_count * 2)
-            risk_score += high_value_score
-            if high_value_score > 5:
-                risk_factors.append(f"Multiple high-value transactions ({high_value_txn_count})")
+        if max_out_amt > self.thresholds['max_out_amt_high']:
+            category_scores['amount'] += 10
+            risk_factors.append(f"High-value transaction (${max_out_amt:,.2f})")
         
-        # Factor 7: Many unique recipients (potential money laundering pattern)
-        if unique_recipients > 30:
-            recipients_score = min(15, (unique_recipients - 30) * 0.5)
-            risk_score += recipients_score
-            if recipients_score > 5:
-                risk_factors.append(f"Many unique recipients ({unique_recipients})")
+        if avg_out_amt > self.thresholds['avg_out_amt_high']:
+            category_scores['amount'] += 10
+            risk_factors.append(f"High avg transaction (${avg_out_amt:,.2f})")
         
-        # Add some randomness to simulate ML model variance (±5%)
-        variance = random.uniform(-5, 5)
-        risk_score = max(0, min(100, risk_score + variance))
+        if amt_zscore > self.thresholds['amt_zscore_high']:
+            category_scores['amount'] += 5
+            risk_factors.append(f"Unusual amount pattern (z={amt_zscore:.1f})")
         
-        # Calculate confidence based on feature completeness
-        feature_count = sum(1 for v in features.values() if v is not None and v != 0)
-        confidence = min(0.95, 0.5 + (feature_count * 0.05))
+        # C. Counterparty signals (max 25 pts)
+        uniq_recip = features.get('uniq_recip', 0) or 0
+        new_recip_rat = features.get('new_recip_rat', 0) or 0
+        recip_entropy = features.get('recip_entropy', 0) or 0
+        
+        if uniq_recip > self.thresholds['unique_recipients_high']:
+            category_scores['counterparty'] += 10
+            risk_factors.append(f"Many recipients ({uniq_recip} unique)")
+        
+        if new_recip_rat > self.thresholds['new_recipient_ratio_high']:
+            category_scores['counterparty'] += 10
+            risk_factors.append(f"High new recipient ratio ({new_recip_rat:.0%})")
+        
+        if recip_entropy > self.thresholds['recipient_entropy_high']:
+            category_scores['counterparty'] += 5
+            risk_factors.append(f"Fan-out pattern (entropy={recip_entropy:.2f})")
+        
+        # D. Device signals (max 15 pts)
+        dev_count = features.get('dev_count', 1) or 1
+        shared_dev_ct = features.get('shared_dev_ct', 0) or 0
+        
+        if dev_count > self.thresholds['device_count_high']:
+            category_scores['device'] += 10
+            risk_factors.append(f"Multiple devices ({dev_count} devices)")
+        
+        if shared_dev_ct > self.thresholds['shared_device_count_high']:
+            category_scores['device'] += 5
+            risk_factors.append(f"Shared device exposure ({shared_dev_ct} accounts)")
+        
+        # E. Lifecycle signals (max 20 pts)
+        acct_age_days = features.get('acct_age_days', 365) or 365
+        first_txn_dly = features.get('first_txn_dly', 30) or 30
+        
+        if acct_age_days < self.thresholds['new_account_days'] and txn_out > self.thresholds['new_account_txn_threshold']:
+            category_scores['lifecycle'] += 15
+            risk_factors.append(f"New account with high activity ({acct_age_days}d old, {txn_out} txns)")
+        
+        if first_txn_dly < self.thresholds['first_txn_delay_suspicious']:
+            category_scores['lifecycle'] += 5
+            risk_factors.append(f"Immediate transaction after creation ({first_txn_dly}d delay)")
+        
+        # Calculate total score (normalize from max 115 to 100)
+        raw_score = sum(category_scores.values())
+        max_possible = sum(self.max_points.values())  # 115
+        risk_score = min(100, (raw_score / max_possible) * 100)
         
         # Generate reason string
         if risk_factors:
-            reason = " | ".join(risk_factors[:3])  # Top 3 factors
+            reason = " | ".join(risk_factors[:3])
         else:
             reason = "Normal account activity"
+        
+        # Calculate confidence based on feature completeness
+        feature_count = sum(1 for v in features.values() if v is not None and v != 0)
+        confidence = min(0.95, 0.5 + (feature_count * 0.03))
         
         return {
             "risk_score": round(risk_score, 2),
             "risk_factors": risk_factors,
             "reason": reason,
+            "category_scores": category_scores,
+            "raw_score": raw_score,
             "confidence": round(confidence, 2),
             "model_version": self.model_version,
             "prediction_time": self.last_prediction_time.isoformat()
         }
     
+    def predict_user_risk(self, account_predictions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Compute user risk as the MAX of all their account risks.
+        
+        Args:
+            account_predictions: List of predict_account_risk results for user's accounts
+            
+        Returns:
+            User risk prediction with highest account's details
+        """
+        if not account_predictions:
+            return {
+                "risk_score": 0,
+                "risk_factors": [],
+                "reason": "No accounts to evaluate",
+                "highest_risk_account": None,
+                "account_count": 0,
+                "model_version": self.model_version,
+            }
+        
+        # Find highest risk account
+        highest = max(account_predictions, key=lambda x: x.get('risk_score', 0))
+        
+        # Aggregate all risk factors
+        all_factors = []
+        for pred in account_predictions:
+            all_factors.extend(pred.get('risk_factors', []))
+        
+        return {
+            "risk_score": highest['risk_score'],
+            "risk_factors": list(set(all_factors))[:5],  # Top 5 unique factors
+            "reason": highest.get('reason', ''),
+            "highest_risk_account": highest,
+            "account_count": len(account_predictions),
+            "model_version": self.model_version,
+            "confidence": highest.get('confidence', 0.5),
+        }
+    
+    def evaluate_device_flagging(self, device_features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate device flagging rules.
+        
+        Args:
+            device_features: Device-fact features
+            
+        Returns:
+            Flagging decision with watchlist and fraud status
+        """
+        shared_acct_ct = device_features.get('shared_acct_ct', 0) or 0
+        avg_acct_risk = device_features.get('avg_acct_risk', 0) or 0
+        flag_acct_ct = device_features.get('flag_acct_ct', 0) or 0
+        
+        watchlist = False
+        fraud = False
+        reasons = []
+        
+        # Watchlist rule: shared_account_count >= 3 AND avg_account_risk >= 70
+        if (shared_acct_ct >= self.thresholds['device_watchlist_shared'] and 
+            avg_acct_risk >= self.thresholds['device_watchlist_risk']):
+            watchlist = True
+            reasons.append(f"Shared by {shared_acct_ct} accounts with avg risk {avg_acct_risk:.0f}")
+        
+        # Fraud rule: flagged_account_count >= 2
+        if flag_acct_ct >= self.thresholds['device_fraud_flagged_count']:
+            fraud = True
+            reasons.append(f"Connected to {flag_acct_ct} flagged accounts")
+        
+        return {
+            "watchlist": watchlist,
+            "fraud": fraud,
+            "reasons": reasons,
+            "device_features": device_features,
+        }
+    
+    # Backwards compatibility: old predict_risk method that works at account level
+    def predict_risk(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Backwards-compatible method for account risk prediction.
+        Maps old feature names to new ones if necessary.
+        """
+        # Map old feature names to new ones
+        mapped_features = {
+            'txn_out_7d': features.get('txn_out_7d', features.get('transaction_count', 0)),
+            'txn_24h_peak': features.get('txn_24h_peak', 0),
+            'avg_txn_day': features.get('avg_txn_day', 0),
+            'max_txn_hr': features.get('max_txn_hr', 0),
+            'txn_zscore': features.get('txn_zscore', 0),
+            'out_amt_7d': features.get('out_amt_7d', features.get('total_amount', 0)),
+            'avg_out_amt': features.get('avg_out_amt', features.get('avg_amount', 0)),
+            'max_out_amt': features.get('max_out_amt', 0),
+            'amt_zscore': features.get('amt_zscore', 0),
+            'uniq_recip': features.get('uniq_recip', features.get('unique_recipients', 0)),
+            'new_recip_rat': features.get('new_recip_rat', 0),
+            'recip_entropy': features.get('recip_entropy', 0),
+            'dev_count': features.get('dev_count', features.get('device_count', 1)),
+            'shared_dev_ct': features.get('shared_dev_ct', 0),
+            'acct_age_days': features.get('acct_age_days', features.get('account_age_days', 365)),
+            'first_txn_dly': features.get('first_txn_dly', 0),
+        }
+        
+        return self.predict_account_risk(mapped_features)
+    
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the ML model."""
         return {
             "model_version": self.model_version,
-            "model_type": "placeholder",
-            "description": "Placeholder ML model for fraud risk scoring. Replace with actual ML integration.",
+            "model_type": "rule-based",
+            "description": "Rule-based fraud scoring at account level. User risk = max(account risks).",
+            "thresholds": self.thresholds,
+            "max_points": self.max_points,
             "features_used": [
-                "transaction_count",
-                "total_amount", 
-                "avg_amount",
-                "device_count",
-                "unique_recipients",
-                "flagged_connections",
-                "account_age_days",
-                "high_value_txn_count"
+                # Velocity
+                "txn_out_7d", "txn_24h_peak", "avg_txn_day", "max_txn_hr", "txn_zscore",
+                # Amount
+                "out_amt_7d", "avg_out_amt", "max_out_amt", "amt_zscore",
+                # Counterparty
+                "uniq_recip", "new_recip_rat", "recip_entropy",
+                # Device
+                "dev_count", "shared_dev_ct",
+                # Lifecycle
+                "acct_age_days", "first_txn_dly"
             ],
             "last_prediction_time": self.last_prediction_time.isoformat() if self.last_prediction_time else None
         }
+    
+    def update_thresholds(self, new_thresholds: Dict[str, Any]) -> Dict[str, Any]:
+        """Update model thresholds."""
+        self.thresholds.update(new_thresholds)
+        logger.info(f"Updated ML thresholds: {new_thresholds}")
+        return self.thresholds
 
 
 # Singleton instance

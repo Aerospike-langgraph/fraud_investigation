@@ -37,6 +37,10 @@ SET_FLAGGED_ACCOUNTS = 'flagged_accounts'
 SET_WORKFLOW = 'workflow'
 SET_CONFIG = 'config'
 SET_HISTORY = 'detection_history'
+# New sets for enhanced data model
+SET_TRANSACTIONS = 'transactions'      # PK = {account_id}:{year_month}
+SET_ACCOUNT_FACT = 'account_fact'      # PK = account_id
+SET_DEVICE_FACT = 'device_fact'        # PK = device_id
 
 # Aerospike bin name limit is 15 characters
 # Map long bin names to short versions
@@ -60,6 +64,36 @@ BIN_NAME_MAP = {
     'current_risk_score': 'curr_risk_score',
     'assigned_analyst': 'assigned_anlst',
     'account_holder': 'acct_holder',
+    # Account-fact bins (15 char limit)
+    'txn_out_count_7d': 'txn_out_7d',
+    'txn_out_count_24h_peak': 'txn_24h_peak',
+    'avg_txn_per_day_7d': 'avg_txn_day',
+    'max_txn_per_hour_7d': 'max_txn_hr',
+    'transaction_zscore': 'txn_zscore',
+    'total_out_amount_7d': 'out_amt_7d',
+    'avg_out_amount_7d': 'avg_out_amt',
+    'max_out_amount_7d': 'max_out_amt',
+    'amount_zscore_7d': 'amt_zscore',
+    'unique_recipients_7d': 'uniq_recip',
+    'new_recipient_ratio_7d': 'new_recip_rat',
+    'recipient_entropy_7d': 'recip_entropy',
+    'device_count_7d': 'dev_count',
+    'shared_device_account_count_7d': 'shared_dev_ct',
+    'account_age_days': 'acct_age_days',
+    'first_txn_delay_days': 'first_txn_dly',
+    'historical_txn_mean': 'hist_txn_mean',
+    'historical_amt_mean': 'hist_amt_mean',
+    'historical_amt_std': 'hist_amt_std',
+    'last_computed': 'last_computed',
+    # Device-fact bins
+    'shared_account_count_7d': 'shared_acct_ct',
+    'flagged_account_count': 'flag_acct_ct',
+    'avg_account_risk_score': 'avg_acct_risk',
+    'max_account_risk_score': 'max_acct_risk',
+    'new_account_rate_7d': 'new_acct_7d',
+    # Transaction bins
+    'counterparty': 'counterparty',
+    'direction': 'direction',
 }
 # Reverse map for reading
 BIN_NAME_REVERSE = {v: k for k, v in BIN_NAME_MAP.items()}
@@ -295,7 +329,7 @@ class AerospikeService:
                         result["errors"] += 1
                         continue
                     
-                    # Parse user data
+                    # Parse user data with nested accounts/devices maps
                     user_data = {
                         "user_id": user_id,
                         "name": row.get('name:String', ''),
@@ -304,20 +338,23 @@ class AerospikeService:
                         "age": int(row.get('age:Int', 0)) if row.get('age:Int') else 0,
                         "location": row.get('location:String', ''),
                         "occupation": row.get('occupation:String', ''),
-                        "risk_score": float(row.get('risk_score:Double', 0)) if row.get('risk_score:Double') else 0.0,
+                        "risk_score": 0.0,  # Initial risk score (will be computed)
                         "signup_date": row.get('signup_date:Date', ''),
                         "created_at": datetime.now().isoformat(),
+                        # Nested maps for accounts and devices
+                        "accounts": {},  # {account_id: {type, balance, bank_name, ...}}
+                        "devices": {},   # {device_id: {type, os, browser, ...}}
                         # Evaluation tracking
-                        "last_evaluated": None,
-                        "evaluation_count": 0,
-                        "current_risk_score": None,
+                        "last_eval": None,
+                        "eval_count": 0,
+                        "curr_risk": None,  # Current computed risk score
                         # Workflow tracking
-                        "workflow_status": None,
+                        "wf_status": None,
                         "flagged_date": None,
-                        "assigned_analyst": None,
+                        "analyst": None,
                         "resolution": None,
-                        "resolution_date": None,
-                        "resolution_notes": None
+                        "resol_date": None,
+                        "resol_notes": None
                     }
                     
                     if self.put(SET_USERS, user_id, user_data):
@@ -534,11 +571,78 @@ class AerospikeService:
         if not user:
             return False
         
-        user["last_evaluated"] = datetime.now().isoformat()
-        user["current_risk_score"] = risk_score
-        user["evaluation_count"] = user.get("evaluation_count", 0) + 1
+        user["last_eval"] = datetime.now().isoformat()
+        user["curr_risk"] = risk_score
+        user["eval_count"] = user.get("eval_count", 0) + 1
         
         return self.put(SET_USERS, user_id, user)
+    
+    def add_account_to_user(self, user_id: str, account_data: Dict[str, Any]) -> bool:
+        """
+        Add an account to a user's accounts map.
+        
+        Args:
+            user_id: The user ID
+            account_data: Account data including account_id, type, balance, bank_name, etc.
+        """
+        user = self.get_user(user_id)
+        if not user:
+            return False
+        
+        account_id = account_data.get('account_id')
+        if not account_id:
+            return False
+        
+        accounts = user.get('accounts', {})
+        accounts[account_id] = {
+            'type': account_data.get('type', ''),
+            'balance': float(account_data.get('balance', 0)),
+            'bank_name': account_data.get('bank_name', ''),
+            'status': account_data.get('status', 'active'),
+            'created_date': account_data.get('created_date', ''),
+        }
+        user['accounts'] = accounts
+        
+        return self.put(SET_USERS, user_id, user)
+    
+    def add_device_to_user(self, user_id: str, device_data: Dict[str, Any]) -> bool:
+        """
+        Add a device to a user's devices map.
+        
+        Args:
+            user_id: The user ID
+            device_data: Device data including device_id, type, os, browser, etc.
+        """
+        user = self.get_user(user_id)
+        if not user:
+            return False
+        
+        device_id = device_data.get('device_id')
+        if not device_id:
+            return False
+        
+        devices = user.get('devices', {})
+        devices[device_id] = {
+            'type': device_data.get('type', ''),
+            'os': device_data.get('os', ''),
+            'browser': device_data.get('browser', ''),
+            'fingerprint': device_data.get('fingerprint', ''),
+            'first_seen': device_data.get('first_seen', ''),
+            'last_login': device_data.get('last_login', ''),
+        }
+        user['devices'] = devices
+        
+        return self.put(SET_USERS, user_id, user)
+    
+    def get_user_accounts(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        """Get all accounts for a user."""
+        user = self.get_user(user_id)
+        return user.get('accounts', {}) if user else {}
+    
+    def get_user_devices(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        """Get all devices for a user."""
+        user = self.get_user(user_id)
+        return user.get('devices', {}) if user else {}
     
     # ----------------------------------------------------------------------------------------------------------
     # Flagged Accounts Operations
@@ -646,6 +750,285 @@ class AerospikeService:
         return records[:limit]
     
     # ----------------------------------------------------------------------------------------------------------
+    # Transaction Operations (KV storage for feature computation)
+    # ----------------------------------------------------------------------------------------------------------
+    
+    def _get_transaction_key(self, account_id: str, timestamp: str = None) -> str:
+        """Generate transaction record key: {account_id}:{year_month}"""
+        if timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            except:
+                dt = datetime.now()
+        else:
+            dt = datetime.now()
+        return f"{account_id}:{dt.strftime('%Y-%m')}"
+    
+    def store_transaction(self, account_id: str, txn_data: Dict[str, Any], direction: str = "out") -> bool:
+        """
+        Store a transaction in the KV transactions set.
+        
+        Args:
+            account_id: The account ID (sender or receiver)
+            txn_data: Transaction data including txn_id, amount, type, counterparty, etc.
+            direction: "out" for outgoing (sent), "in" for incoming (received)
+        
+        The transaction is stored in a map keyed by timestamp within a record
+        partitioned by account_id and year-month.
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            timestamp = txn_data.get('timestamp', datetime.now().isoformat())
+            record_key = self._get_transaction_key(account_id, timestamp)
+            
+            # Build transaction entry
+            txn_entry = {
+                'txn_id': txn_data.get('txn_id', ''),
+                'amount': float(txn_data.get('amount', 0)),
+                'type': txn_data.get('type', 'transfer'),
+                'counterparty': txn_data.get('counterparty', ''),
+                'direction': direction,
+                'method': txn_data.get('method', 'electronic'),
+                'location': txn_data.get('location', ''),
+                'status': txn_data.get('status', 'completed'),
+            }
+            
+            # Get existing record or create new
+            key = (self.namespace, SET_TRANSACTIONS, record_key)
+            try:
+                _, _, bins = self.client.get(key)
+                txs_map = bins.get('txs', {}) if bins else {}
+            except ex.RecordNotFound:
+                txs_map = {}
+            
+            # Add transaction to map (key = timestamp)
+            txs_map[timestamp] = txn_entry
+            
+            # Store updated record
+            data = {
+                'txs': txs_map,
+                'account_id': account_id,
+                'year_month': record_key.split(':')[1]
+            }
+            self.client.put(key, data)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error storing transaction for {account_id}: {e}")
+            return False
+    
+    def get_transactions_for_account(self, account_id: str, days: int = 7) -> List[Dict[str, Any]]:
+        """
+        Get transactions for an account within a sliding window.
+        Uses batch read + map filtering for efficiency.
+        
+        Args:
+            account_id: The account ID
+            days: Number of days to look back (configurable cooldown)
+            
+        Returns:
+            List of transactions within the window
+        """
+        if not self.is_connected():
+            return []
+        
+        try:
+            now = datetime.now()
+            cutoff = (now - timedelta(days=days)).isoformat()
+            
+            # Generate record keys for relevant months
+            keys = []
+            for i in range(max(1, (days // 30) + 2)):  # Cover enough months
+                month_date = now - timedelta(days=30 * i)
+                record_key = f"{account_id}:{month_date.strftime('%Y-%m')}"
+                keys.append((self.namespace, SET_TRANSACTIONS, record_key))
+            
+            # Batch read records
+            records = self.client.get_many(keys)
+            
+            # Filter transactions by timestamp
+            transactions = []
+            for record in records:
+                if record and record[2]:  # bins exist
+                    txs_map = record[2].get('txs', {})
+                    for ts, txn in txs_map.items():
+                        if ts >= cutoff:
+                            transactions.append({**txn, 'timestamp': ts})
+            
+            # Sort by timestamp descending
+            transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+            return transactions
+            
+        except Exception as e:
+            logger.error(f"Error getting transactions for {account_id}: {e}")
+            return []
+    
+    def batch_get_transactions(self, account_ids: List[str], days: int = 7) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Batch read transactions for multiple accounts.
+        
+        Args:
+            account_ids: List of account IDs
+            days: Number of days to look back
+            
+        Returns:
+            Dict mapping account_id to list of transactions
+        """
+        result = {aid: [] for aid in account_ids}
+        
+        if not self.is_connected() or not account_ids:
+            return result
+        
+        try:
+            now = datetime.now()
+            cutoff = (now - timedelta(days=days)).isoformat()
+            
+            # Generate all keys for all accounts
+            keys = []
+            key_to_account = {}
+            
+            for account_id in account_ids:
+                for i in range(max(1, (days // 30) + 2)):
+                    month_date = now - timedelta(days=30 * i)
+                    record_key = f"{account_id}:{month_date.strftime('%Y-%m')}"
+                    key = (self.namespace, SET_TRANSACTIONS, record_key)
+                    keys.append(key)
+                    key_to_account[record_key] = account_id
+            
+            # Batch read
+            records = self.client.get_many(keys)
+            
+            # Process results
+            for record in records:
+                if record and record[2]:
+                    bins = record[2]
+                    account_id = bins.get('account_id', '')
+                    txs_map = bins.get('txs', {})
+                    
+                    if account_id in result:
+                        for ts, txn in txs_map.items():
+                            if ts >= cutoff:
+                                result[account_id].append({**txn, 'timestamp': ts})
+            
+            # Sort each account's transactions
+            for account_id in result:
+                result[account_id].sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error batch getting transactions: {e}")
+            return result
+    
+    # ----------------------------------------------------------------------------------------------------------
+    # Account-Fact Operations (Pre-computed features for ML)
+    # ----------------------------------------------------------------------------------------------------------
+    
+    def get_account_fact(self, account_id: str) -> Optional[Dict[str, Any]]:
+        """Get computed features for an account."""
+        return self.get(SET_ACCOUNT_FACT, account_id)
+    
+    def update_account_fact(self, account_id: str, features: Dict[str, Any]) -> bool:
+        """
+        Update computed features for an account.
+        
+        Args:
+            account_id: The account ID
+            features: Dict of computed features (uses short bin names internally)
+        """
+        features['account_id'] = account_id
+        features['last_computed'] = datetime.now().isoformat()
+        return self.put(SET_ACCOUNT_FACT, account_id, features)
+    
+    def batch_get_account_facts(self, account_ids: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        Batch read account facts for multiple accounts.
+        
+        Args:
+            account_ids: List of account IDs
+            
+        Returns:
+            Dict mapping account_id to features (or None if not found)
+        """
+        result = {aid: None for aid in account_ids}
+        
+        if not self.is_connected() or not account_ids:
+            return result
+        
+        try:
+            keys = [(self.namespace, SET_ACCOUNT_FACT, aid) for aid in account_ids]
+            records = self.client.get_many(keys)
+            
+            for i, record in enumerate(records):
+                if record and record[2]:
+                    result[account_ids[i]] = self._expand_bin_names(record[2])
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error batch getting account facts: {e}")
+            return result
+    
+    def get_all_account_facts(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """Get all account facts."""
+        return self.scan_all(SET_ACCOUNT_FACT, limit)
+    
+    # ----------------------------------------------------------------------------------------------------------
+    # Device-Fact Operations (Pre-computed features for device flagging)
+    # ----------------------------------------------------------------------------------------------------------
+    
+    def get_device_fact(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Get computed features for a device."""
+        return self.get(SET_DEVICE_FACT, device_id)
+    
+    def update_device_fact(self, device_id: str, features: Dict[str, Any]) -> bool:
+        """
+        Update computed features for a device.
+        
+        Args:
+            device_id: The device ID
+            features: Dict of computed features
+        """
+        features['device_id'] = device_id
+        features['last_computed'] = datetime.now().isoformat()
+        return self.put(SET_DEVICE_FACT, device_id, features)
+    
+    def batch_get_device_facts(self, device_ids: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        Batch read device facts for multiple devices.
+        
+        Args:
+            device_ids: List of device IDs
+            
+        Returns:
+            Dict mapping device_id to features (or None if not found)
+        """
+        result = {did: None for did in device_ids}
+        
+        if not self.is_connected() or not device_ids:
+            return result
+        
+        try:
+            keys = [(self.namespace, SET_DEVICE_FACT, did) for did in device_ids]
+            records = self.client.get_many(keys)
+            
+            for i, record in enumerate(records):
+                if record and record[2]:
+                    result[device_ids[i]] = self._expand_bin_names(record[2])
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error batch getting device facts: {e}")
+            return result
+    
+    def get_all_device_facts(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """Get all device facts."""
+        return self.scan_all(SET_DEVICE_FACT, limit)
+    
+    # ----------------------------------------------------------------------------------------------------------
     # Statistics
     # ----------------------------------------------------------------------------------------------------------
     
@@ -654,11 +1037,26 @@ class AerospikeService:
         return {
             "users_count": len(self.scan_all(SET_USERS, limit=100000)),
             "flagged_accounts_count": len(self.scan_all(SET_FLAGGED_ACCOUNTS, limit=100000)),
+            "account_facts_count": len(self.scan_all(SET_ACCOUNT_FACT, limit=100000)),
+            "device_facts_count": len(self.scan_all(SET_DEVICE_FACT, limit=100000)),
+            "transaction_records_count": len(self.scan_all(SET_TRANSACTIONS, limit=100000)),
             "pending_review": len(self.get_users_by_workflow_status("pending_review")),
             "under_investigation": len(self.get_users_by_workflow_status("under_investigation")),
             "confirmed_fraud": len(self.get_users_by_workflow_status("confirmed_fraud")),
             "cleared": len(self.get_users_by_workflow_status("cleared")),
             "connected": self.is_connected()
+        }
+    
+    def truncate_all_data(self) -> Dict[str, bool]:
+        """Truncate all data sets (for fresh bulk load)."""
+        return {
+            "users": self.truncate_set(SET_USERS),
+            "flagged_accounts": self.truncate_set(SET_FLAGGED_ACCOUNTS),
+            "account_facts": self.truncate_set(SET_ACCOUNT_FACT),
+            "device_facts": self.truncate_set(SET_DEVICE_FACT),
+            "transactions": self.truncate_set(SET_TRANSACTIONS),
+            "evaluations": self.truncate_set(SET_EVALUATIONS),
+            "history": self.truncate_set(SET_HISTORY),
         }
 
 

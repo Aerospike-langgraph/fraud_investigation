@@ -10,4 +10,5 @@ WORKDIR /frontend
 
 RUN npm install
 
-CMD [ "sh", "-c", "wget --post-data='' http://asgraph-backend:4000/bulk-load-gremlin ; npm run deploy"]
+# Bulk loading removed - use frontend Data Management page to load data
+CMD [ "npm", "run", "deploy" ]

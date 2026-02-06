@@ -2,8 +2,13 @@
 Flagged Account Detection Service
 
 This service handles the detection and management of flagged accounts.
-It uses the ML model service for risk prediction and manages cooldown periods
-for account evaluation.
+It uses pre-computed features from account-fact KV set and rule-based ML scoring.
+
+Detection Flow:
+1. Compute features for all accounts (via feature_service)
+2. Score each account using account-fact features
+3. Calculate user risk = max(account_risks)
+4. Flag users above threshold
 """
 
 import logging
@@ -32,6 +37,7 @@ HISTORY_FILE = os.path.join(DATA_DIR, 'detection_history.json')
 class FlaggedAccountService:
     """
     Service for managing flagged account detection with cooldown support.
+    Uses account-fact KV set for pre-computed features.
     Requires Aerospike KV storage for risk evaluation features.
     """
     
@@ -39,6 +45,7 @@ class FlaggedAccountService:
         self.graph_service = graph_service
         self._lock = Lock()
         self._aerospike = None  # Will be set if Aerospike is available
+        self._feature_service = None  # Will be set for feature computation
         
         # In-memory storage (used as fallback when Aerospike not available)
         self._flagged_accounts: Dict[str, Dict[str, Any]] = {}
@@ -50,7 +57,7 @@ class FlaggedAccountService:
             "schedule_enabled": True,
             "schedule_time": "21:30",
             "cooldown_days": 7,
-            "risk_threshold": 70
+            "risk_threshold": 50  # Lowered from 70 for demo data
         }
         
         # Ensure data directory exists
@@ -63,6 +70,11 @@ class FlaggedAccountService:
         """Set the Aerospike service for storage operations."""
         self._aerospike = aerospike_service
         logger.info("Aerospike service configured for flagged account storage")
+    
+    def set_feature_service(self, feature_service):
+        """Set the feature service for computing account features."""
+        self._feature_service = feature_service
+        logger.info("Feature service configured for detection")
         
         # Load config from Aerospike if available
         if self._aerospike and self._aerospike.is_connected():
@@ -271,20 +283,22 @@ class FlaggedAccountService:
     # Detection Job
     # ----------------------------------------------------------------------------------------------------------
     
-    def run_detection(self, skip_cooldown: bool = False) -> Dict[str, Any]:
+    def run_detection(self, skip_cooldown: bool = False, compute_features: bool = True) -> Dict[str, Any]:
         """
-        Run the flagged account detection job.
+        Run the flagged account detection job using account-level scoring.
         
         This method:
-        1. Gets users from Aerospike (required)
-        2. Filters out users in cooldown (unless skip_cooldown=True)
-        3. Extracts features for eligible users
-        4. Calls ML model for risk prediction
-        5. Flags users above the risk threshold
-        6. Updates evaluation records
+        1. Optionally computes features for all accounts (via feature_service)
+        2. Gets users from Aerospike (respecting cooldown unless skip_cooldown=True)
+        3. For each user, gets their accounts' features from account-fact
+        4. Scores each account using ML rules
+        5. User risk = max(account_risks)
+        6. Flags users above the risk threshold
+        7. Updates evaluation records and device flags
         
         Args:
             skip_cooldown: If True, evaluate all users regardless of cooldown period
+            compute_features: If True, run feature computation before detection
         
         Requires Aerospike KV to be connected.
         """
@@ -309,55 +323,102 @@ class FlaggedAccountService:
             "start_time": start_time.isoformat(),
             "status": "running",
             "accounts_evaluated": 0,
+            "users_evaluated": 0,
             "accounts_skipped_cooldown": 0,
             "newly_flagged": 0,
-            "total_accounts": 0,
+            "total_users": 0,
+            "feature_computation": None,
             "errors": [],
-            "source": "aerospike"
+            "source": "account-fact"
         }
         
         try:
             with self._lock:
-                # Get users from Aerospike for evaluation
-                # If skip_cooldown=True, use cooldown_days=0 to get ALL users
+                # Step 1: Optionally compute features first
+                if compute_features and self._feature_service:
+                    logger.info("Computing account and device features...")
+                    feature_result = self._feature_service.run_feature_computation_job(
+                        window_days=self._config["cooldown_days"]
+                    )
+                    job_result["feature_computation"] = {
+                        "accounts_processed": feature_result.get("accounts_processed", 0),
+                        "devices_processed": feature_result.get("devices_processed", 0),
+                    }
+                
+                # Step 2: Get users from Aerospike for evaluation
                 effective_cooldown = 0 if skip_cooldown else self._config["cooldown_days"]
                 all_users = self._aerospike.get_users_for_evaluation(
                     cooldown_days=effective_cooldown,
                     limit=10000
                 )
-                # Also get total count for stats
                 total_users = len(self._aerospike.get_all_users(limit=100000))
-                job_result["total_accounts"] = total_users
+                job_result["total_users"] = total_users
                 job_result["accounts_skipped_cooldown"] = total_users - len(all_users) if not skip_cooldown else 0
                 
                 cooldown_msg = " (cooldown skipped)" if skip_cooldown else ""
-                logger.info(f"Starting detection job for {len(all_users)} users from Aerospike{cooldown_msg}")
+                logger.info(f"Starting detection job for {len(all_users)} users{cooldown_msg}")
                 
+                # Step 3: Evaluate each user
                 for user in all_users:
                     user_id = user.get("user_id")
                     if not user_id:
                         continue
                     
                     try:
-                        # Extract features from graph for this user
-                        features = self._extract_user_features(user_id, user)
+                        # Get user's accounts from the nested accounts map
+                        accounts_map = user.get("accounts", {})
+                        if not accounts_map:
+                            # Fallback: try to get from graph
+                            accounts_map = self._get_user_accounts_from_graph(user_id)
                         
-                        # Get ML prediction
-                        prediction = ml_model_service.predict_risk(features)
-                        risk_score = prediction["risk_score"]
+                        if not accounts_map:
+                            continue
                         
-                        # Update evaluation in Aerospike
-                        self._aerospike.update_user_evaluation(user_id, risk_score)
-                        job_result["accounts_evaluated"] += 1
+                        # Score each account using account-fact features
+                        account_predictions = []
+                        for account_id in accounts_map.keys():
+                            # Get pre-computed features from account-fact
+                            account_fact = self._aerospike.get_account_fact(account_id)
+                            
+                            if account_fact:
+                                # Score using ML rules
+                                prediction = ml_model_service.predict_account_risk(account_fact)
+                                prediction["account_id"] = account_id
+                                account_predictions.append(prediction)
+                                
+                                # Update account-fact with risk score
+                                account_fact["risk_score"] = prediction["risk_score"]
+                                self._aerospike.update_account_fact(account_id, account_fact)
+                                
+                                job_result["accounts_evaluated"] += 1
+                            else:
+                                # No features computed yet - use legacy extraction
+                                features = self._extract_user_features(user_id, user)
+                                prediction = ml_model_service.predict_risk(features)
+                                prediction["account_id"] = account_id
+                                account_predictions.append(prediction)
+                                job_result["accounts_evaluated"] += 1
                         
-                        # Flag if above threshold
-                        if risk_score >= self._config["risk_threshold"]:
-                            self._flag_user(user, prediction, features)
-                            job_result["newly_flagged"] += 1
+                        # User risk = max(account_risks)
+                        if account_predictions:
+                            user_prediction = ml_model_service.predict_user_risk(account_predictions)
+                            risk_score = user_prediction["risk_score"]
+                            
+                            # Update user evaluation in Aerospike
+                            self._aerospike.update_user_evaluation(user_id, risk_score)
+                            job_result["users_evaluated"] += 1
+                            
+                            # Flag if above threshold
+                            if risk_score >= self._config["risk_threshold"]:
+                                self._flag_user_with_accounts(user, user_prediction, account_predictions)
+                                job_result["newly_flagged"] += 1
                             
                     except Exception as e:
                         logger.error(f"Error evaluating user {user_id}: {e}")
                         job_result["errors"].append(f"User {user_id}: {str(e)}")
+                
+                # Step 4: Update device flags based on computed device-facts
+                self._update_device_flags()
                 
                 # Update job result
                 end_time = datetime.now()
@@ -371,8 +432,8 @@ class FlaggedAccountService:
                 # Save data
                 self._save_data()
                 
-                logger.info(f"Detection job completed: evaluated={job_result['accounts_evaluated']}, "
-                           f"skipped={job_result['accounts_skipped_cooldown']}, "
+                logger.info(f"Detection job completed: users={job_result['users_evaluated']}, "
+                           f"accounts={job_result['accounts_evaluated']}, "
                            f"flagged={job_result['newly_flagged']}")
                 
                 return job_result
@@ -385,6 +446,87 @@ class FlaggedAccountService:
             self._detection_history.append(job_result)
             self._save_data()
             return job_result
+    
+    def _get_user_accounts_from_graph(self, user_id: str) -> Dict[str, Dict]:
+        """Get user's accounts from graph if not in KV."""
+        if not self.graph_service or not self.graph_service.client:
+            return {}
+        
+        try:
+            g = self.graph_service.client
+            account_ids = g.V(user_id).out("OWNS").id_().toList()
+            return {aid: {} for aid in account_ids}
+        except:
+            return {}
+    
+    def _flag_user_with_accounts(self, user: Dict, user_prediction: Dict, account_predictions: List[Dict]):
+        """Flag a user with account-level details."""
+        user_id = user.get("user_id")
+        now = datetime.now().isoformat()
+        
+        # Find highest risk account
+        highest_account = user_prediction.get("highest_risk_account", {})
+        
+        flagged_record = {
+            "account_id": user_id,  # Keep backwards compatible naming
+            "user_id": user_id,
+            "account_holder": user.get("name", "Unknown"),
+            "email": user.get("email", ""),
+            "risk_score": user_prediction["risk_score"],
+            "flag_reason": user_prediction.get("reason", ""),
+            "risk_factors": user_prediction.get("risk_factors", []),
+            "flagged_date": now,
+            "status": "pending_review",
+            "account_count": user_prediction.get("account_count", 0),
+            "highest_risk_account_id": highest_account.get("account_id", ""),
+            "account_predictions": [
+                {"account_id": p.get("account_id"), "risk_score": p.get("risk_score")}
+                for p in account_predictions
+            ],
+            "model_version": user_prediction.get("model_version", "unknown"),
+            "confidence": user_prediction.get("confidence", 0),
+        }
+        
+        # Store in Aerospike and local cache
+        if self._use_aerospike():
+            self._aerospike.flag_account(flagged_record)
+        
+        self._flagged_accounts[user_id] = flagged_record
+        logger.info(f"Flagged user {user_id} with risk score {user_prediction['risk_score']} "
+                   f"({len(account_predictions)} accounts evaluated)")
+    
+    def _update_device_flags(self):
+        """Update device fraud flags based on device-fact features."""
+        if not self._use_aerospike():
+            return
+        
+        try:
+            device_facts = self._aerospike.get_all_device_facts(limit=100000)
+            
+            for device_fact in device_facts:
+                device_id = device_fact.get("device_id")
+                if not device_id:
+                    continue
+                
+                # Apply device flagging rules
+                flagging = ml_model_service.evaluate_device_flagging(device_fact)
+                
+                # Update device-fact with watchlist/fraud status
+                device_fact["watchlist"] = flagging["watchlist"]
+                device_fact["fraud"] = flagging["fraud"]
+                self._aerospike.update_device_fact(device_id, device_fact)
+                
+                # Update graph vertex fraud_flag if device is flagged
+                if flagging["fraud"] and self.graph_service and self.graph_service.client:
+                    try:
+                        self.graph_service.client.V(device_id) \
+                            .property("fraud_flag", True) \
+                            .iterate()
+                    except:
+                        pass
+                        
+        except Exception as e:
+            logger.warning(f"Error updating device flags: {e}")
     
     def _get_all_accounts(self) -> List[Dict[str, Any]]:
         """Get all accounts from the graph database."""

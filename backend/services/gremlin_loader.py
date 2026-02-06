@@ -4,11 +4,15 @@ Gremlin-based Data Loader
 This loader bypasses the buggy Aerospike Graph bulk loader by using 
 direct Gremlin queries to insert vertices and edges with correct labels
 and property names.
+
+Key features:
+- Drops fraud_flag on load (set to False) - flags are computed by ML
+- Syncs data to KV store (users with nested accounts/devices maps)
 """
 
 import csv
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from gremlin_python.process.graph_traversal import __
 from gremlin_python.structure.graph import Graph
@@ -20,9 +24,17 @@ logger = logging.getLogger('fraud_detection.gremlin_loader')
 class GremlinDataLoader:
     """Load graph data using Gremlin queries instead of bulk loader."""
     
-    def __init__(self, graph_service):
+    def __init__(self, graph_service, aerospike_service=None):
         self.graph = graph_service
+        self.kv = aerospike_service  # For KV sync
         self.batch_size = 100
+        
+        # Track loaded data for KV sync
+        self._loaded_users = {}      # {user_id: user_data}
+        self._loaded_accounts = {}   # {account_id: account_data}
+        self._loaded_devices = {}    # {device_id: device_data}
+        self._owns_edges = []        # [(user_id, account_id), ...]
+        self._uses_edges = []        # [(user_id, device_id), ...]
         
     def _check_data_exists(self) -> Dict[str, int]:
         """Check if data already exists in the graph database."""
@@ -45,15 +57,34 @@ class GremlinDataLoader:
             return {"users": 0, "accounts": 0, "devices": 0, "owns_edges": 0, "uses_edges": 0}
     
     def load_all_data(self, vertices_path: str = "/data/graph_csv/vertices", 
-                      edges_path: str = "/data/graph_csv/edges") -> Dict[str, Any]:
-        """Load all vertices and edges from CSV files."""
+                      edges_path: str = "/data/graph_csv/edges",
+                      sync_kv: bool = True) -> Dict[str, Any]:
+        """
+        Load all vertices and edges from CSV files.
+        
+        Args:
+            vertices_path: Path to vertices CSV directory
+            edges_path: Path to edges CSV directory
+            sync_kv: If True, sync loaded data to KV store
+            
+        Returns:
+            Result dict with counts and status
+        """
         result = {
             "success": True,
             "vertices": {"users": 0, "accounts": 0, "devices": 0},
             "edges": {"owns": 0, "uses": 0},
+            "kv_sync": {"users": 0, "accounts_linked": 0, "devices_linked": 0},
             "errors": [],
             "skipped": False
         }
+        
+        # Clear tracking data
+        self._loaded_users = {}
+        self._loaded_accounts = {}
+        self._loaded_devices = {}
+        self._owns_edges = []
+        self._uses_edges = []
         
         try:
             # Check if data already exists
@@ -74,10 +105,10 @@ class GremlinDataLoader:
             logger.info("Loading users...")
             result["vertices"]["users"] = self._load_users(f"{vertices_path}/users/users.csv")
             
-            logger.info("Loading accounts...")
+            logger.info("Loading accounts (fraud_flag=False)...")
             result["vertices"]["accounts"] = self._load_accounts(f"{vertices_path}/accounts/accounts.csv")
             
-            logger.info("Loading devices...")
+            logger.info("Loading devices (fraud_flag=False)...")
             result["vertices"]["devices"] = self._load_devices(f"{vertices_path}/devices/devices.csv")
             
             # Load edges (with duplicate checking)
@@ -86,6 +117,12 @@ class GremlinDataLoader:
             
             logger.info("Loading USES edges...")
             result["edges"]["uses"] = self._load_uses_edges(f"{edges_path}/usage/uses.csv")
+            
+            # Sync to KV store if enabled
+            if sync_kv and self.kv and self.kv.is_connected():
+                logger.info("Syncing to KV store...")
+                kv_result = self._sync_to_kv()
+                result["kv_sync"] = kv_result
             
             logger.info(f"✅ Data loading complete: {result}")
             
@@ -116,10 +153,13 @@ class GremlinDataLoader:
                         "age": int(row.get("age:Int", 0)) if row.get("age:Int") else 0,
                         "location": row.get("location:String", ""),
                         "occupation": row.get("occupation:String", ""),
-                        "risk_score": float(row.get("risk_score:Double", 0)) if row.get("risk_score:Double") else 0.0,
+                        "risk_score": 0.0,  # Initial risk score (will be computed by ML)
                         "signup_date": row.get("signup_date:Date", "")
                     }
                     batch.append(vertex_data)
+                    
+                    # Track for KV sync
+                    self._loaded_users[vertex_data["id"]] = vertex_data
                     
                     if len(batch) >= self.batch_size:
                         self._insert_user_batch(batch)
@@ -164,7 +204,7 @@ class GremlinDataLoader:
                 logger.warning(f"Error inserting user {user['id']}: {e}")
     
     def _load_accounts(self, csv_path: str) -> int:
-        """Load accounts from CSV with correct schema."""
+        """Load accounts from CSV with correct schema. fraud_flag is always set to False."""
         if not self.graph.client:
             raise Exception("Graph client not available")
             
@@ -182,9 +222,12 @@ class GremlinDataLoader:
                         "bank_name": row.get("bank_name:String", ""),
                         "status": row.get("status:String", "active"),
                         "created_date": row.get("created_date:Date", ""),
-                        "fraud_flag": row.get("fraud_flag:Boolean", "False").lower() == "true"
+                        "fraud_flag": False  # Always False - flags are computed by ML
                     }
                     batch.append(vertex_data)
+                    
+                    # Track for KV sync
+                    self._loaded_accounts[vertex_data["id"]] = vertex_data
                     
                     if len(batch) >= self.batch_size:
                         self._insert_account_batch(batch)
@@ -226,7 +269,7 @@ class GremlinDataLoader:
                 logger.warning(f"Error inserting account {account['id']}: {e}")
     
     def _load_devices(self, csv_path: str) -> int:
-        """Load devices from CSV with correct schema."""
+        """Load devices from CSV with correct schema. fraud_flag is always set to False."""
         if not self.graph.client:
             raise Exception("Graph client not available")
             
@@ -246,9 +289,12 @@ class GremlinDataLoader:
                         "first_seen": row.get("first_seen:Date", ""),
                         "last_login": row.get("last_login:Date", ""),
                         "login_count": int(row.get("login_count:Int", 0)) if row.get("login_count:Int") else 0,
-                        "fraud_flag": row.get("fraud_flag:Boolean", "False").lower() == "true"
+                        "fraud_flag": False  # Always False - flags are computed by ML
                     }
                     batch.append(vertex_data)
+                    
+                    # Track for KV sync
+                    self._loaded_devices[vertex_data["id"]] = vertex_data
                     
                     if len(batch) >= self.batch_size:
                         self._insert_device_batch(batch)
@@ -304,10 +350,13 @@ class GremlinDataLoader:
                 reader = csv.DictReader(f)
                 
                 for row in reader:
-                    from_id = row.get("~from")
-                    to_id = row.get("~to")
+                    from_id = row.get("~from")  # user_id
+                    to_id = row.get("~to")      # account_id
                     
                     if from_id and to_id:
+                        # Track for KV sync (all edges, including existing)
+                        self._owns_edges.append((from_id, to_id))
+                        
                         try:
                             # Check if edge already exists between these vertices
                             edge_exists = self.graph.client.V(from_id) \
@@ -356,10 +405,13 @@ class GremlinDataLoader:
                 reader = csv.DictReader(f)
                 
                 for row in reader:
-                    from_id = row.get("~from")
-                    to_id = row.get("~to")
+                    from_id = row.get("~from")  # user_id
+                    to_id = row.get("~to")      # device_id
                     
                     if from_id and to_id:
+                        # Track for KV sync (all edges, including existing)
+                        self._uses_edges.append((from_id, to_id))
+                        
                         try:
                             # Check if edge already exists between these vertices
                             edge_exists = self.graph.client.V(from_id) \
@@ -394,8 +446,115 @@ class GremlinDataLoader:
             logger.warning(f"USES edges: {count} loaded, {errors} errors")
             
         return count
+    
+    # ----------------------------------------------------------------------------------------------------------
+    # KV Store Sync
+    # ----------------------------------------------------------------------------------------------------------
+    
+    def _sync_to_kv(self) -> Dict[str, int]:
+        """
+        Sync loaded data to KV store.
+        Creates users with nested accounts and devices maps.
+        """
+        result = {
+            "users": 0,
+            "accounts_linked": 0,
+            "devices_linked": 0,
+            "errors": 0
+        }
+        
+        if not self.kv or not self.kv.is_connected():
+            logger.warning("KV service not available for sync")
+            return result
+        
+        try:
+            # Build user -> accounts mapping
+            user_accounts = {}
+            for user_id, account_id in self._owns_edges:
+                if user_id not in user_accounts:
+                    user_accounts[user_id] = []
+                user_accounts[user_id].append(account_id)
+            
+            # Build user -> devices mapping
+            user_devices = {}
+            for user_id, device_id in self._uses_edges:
+                if user_id not in user_devices:
+                    user_devices[user_id] = []
+                user_devices[user_id].append(device_id)
+            
+            # Create KV user records with nested accounts and devices
+            for user_id, user_data in self._loaded_users.items():
+                try:
+                    # Build accounts map
+                    accounts_map = {}
+                    for account_id in user_accounts.get(user_id, []):
+                        account_data = self._loaded_accounts.get(account_id, {})
+                        accounts_map[account_id] = {
+                            'type': account_data.get('type', ''),
+                            'balance': account_data.get('balance', 0),
+                            'bank_name': account_data.get('bank_name', ''),
+                            'status': account_data.get('status', 'active'),
+                            'created_date': account_data.get('created_date', ''),
+                        }
+                        result["accounts_linked"] += 1
+                    
+                    # Build devices map
+                    devices_map = {}
+                    for device_id in user_devices.get(user_id, []):
+                        device_data = self._loaded_devices.get(device_id, {})
+                        devices_map[device_id] = {
+                            'type': device_data.get('type', ''),
+                            'os': device_data.get('os', ''),
+                            'browser': device_data.get('browser', ''),
+                            'fingerprint': device_data.get('fingerprint', ''),
+                            'first_seen': device_data.get('first_seen', ''),
+                            'last_login': device_data.get('last_login', ''),
+                        }
+                        result["devices_linked"] += 1
+                    
+                    # Create KV record
+                    kv_user_data = {
+                        "user_id": user_id,
+                        "name": user_data.get("name", ""),
+                        "email": user_data.get("email", ""),
+                        "phone": user_data.get("phone", ""),
+                        "age": user_data.get("age", 0),
+                        "location": user_data.get("location", ""),
+                        "occupation": user_data.get("occupation", ""),
+                        "risk_score": 0.0,  # Will be computed by ML
+                        "signup_date": user_data.get("signup_date", ""),
+                        "created_at": datetime.now().isoformat(),
+                        "accounts": accounts_map,
+                        "devices": devices_map,
+                        "last_eval": None,
+                        "eval_count": 0,
+                        "curr_risk": None,
+                    }
+                    
+                    if self.kv.put('users', user_id, kv_user_data):
+                        result["users"] += 1
+                    else:
+                        result["errors"] += 1
+                        
+                except Exception as e:
+                    result["errors"] += 1
+                    logger.warning(f"Error syncing user {user_id} to KV: {e}")
+            
+            logger.info(f"KV sync complete: {result['users']} users, "
+                       f"{result['accounts_linked']} accounts linked, "
+                       f"{result['devices_linked']} devices linked")
+            
+        except Exception as e:
+            logger.error(f"Error in KV sync: {e}")
+            result["errors"] += 1
+        
+        return result
+    
+    def set_aerospike_service(self, aerospike_service):
+        """Set the Aerospike service for KV sync."""
+        self.kv = aerospike_service
 
 
 # Singleton instance creator
-def create_gremlin_loader(graph_service):
-    return GremlinDataLoader(graph_service)
+def create_gremlin_loader(graph_service, aerospike_service=None):
+    return GremlinDataLoader(graph_service, aerospike_service)

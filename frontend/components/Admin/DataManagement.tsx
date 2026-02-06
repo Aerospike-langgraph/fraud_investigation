@@ -21,7 +21,8 @@ import {
     Server,
     Upload,
     FolderOpen,
-    FileText
+    FileText,
+    Trash2
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -84,12 +85,16 @@ const DataManagement = () => {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     
-    // Demo injection state
-    const [demoLoading, setDemoLoading] = useState(false)
-    const [demoTxnCount, setDemoTxnCount] = useState(500)
-    const [demoSpreadDays, setDemoSpreadDays] = useState(30)
-    const [demoHighValuePct, setDemoHighValuePct] = useState(15)
-    const [demoSeedFlagged, setDemoSeedFlagged] = useState(5)
+    // Historical Transaction Injection state
+    const [injectionLoading, setInjectionLoading] = useState(false)
+    const [txnCount, setTxnCount] = useState(10000)
+    const [spreadDays, setSpreadDays] = useState(30)
+    const [fraudPercentage, setFraudPercentage] = useState(15)
+    const [injectionResult, setInjectionResult] = useState<any>(null)
+    
+    // Delete all data state
+    const [deleteLoading, setDeleteLoading] = useState(false)
+    const [confirmDelete, setConfirmDelete] = useState(false)
 
     // Fetch current graph statistics
     const fetchGraphStats = async () => {
@@ -322,38 +327,82 @@ const DataManagement = () => {
         }
     }
 
-    // Inject demo suspicious activity
-    const handleInjectDemoActivity = async () => {
-        setDemoLoading(true)
+    // Inject historical transactions with fraud patterns
+    const handleInjectTransactions = async () => {
+        setInjectionLoading(true)
+        setInjectionResult(null)
         try {
             const params = new URLSearchParams({
-                transaction_count: String(demoTxnCount),
-                spread_days: String(demoSpreadDays),
-                high_value_percentage: String(demoHighValuePct),
-                seed_flagged_accounts: String(demoSeedFlagged)
+                transaction_count: String(txnCount),
+                spread_days: String(spreadDays),
+                fraud_percentage: String(fraudPercentage / 100) // Convert to decimal
             })
             
-            const response = await fetch(`/api/demo/inject-suspicious-activity?${params.toString()}`, {
+            const response = await fetch(`/api/inject-historical-transactions?${params.toString()}`, {
                 method: 'POST'
             })
             
             const data = await response.json()
             
-            if (data.success) {
-                toast.success(`Injected ${data.details.total_transactions} demo transactions!`)
-                toast.info(`${data.details.high_value_transactions} high-value, ${data.details.flagged_seeds} flagged seeds`)
+            if (data.status === 'completed') {
+                setInjectionResult(data)
+                toast.success(`Injected ${data.normal_transactions + data.fraud_transactions} transactions!`)
+                
+                // Show fraud pattern breakdown
+                const patterns = data.fraud_patterns
+                if (patterns) {
+                    toast.info(`Fraud: ${data.fraud_transactions} (rings: ${patterns.fraud_rings}, velocity: ${patterns.velocity_anomalies}, amount: ${patterns.amount_anomalies}, new account: ${patterns.new_account_fraud})`)
+                }
                 
                 // Refresh stats
                 await fetchGraphStats()
                 await fetchAerospikeStats()
             } else {
-                toast.error(data.detail || 'Failed to inject demo activity')
+                toast.error(data.error || data.detail || 'Failed to inject transactions')
             }
         } catch (error) {
-            console.error('Failed to inject demo activity:', error)
-            toast.error('Failed to inject demo activity')
+            console.error('Failed to inject transactions:', error)
+            toast.error('Failed to inject transactions')
         } finally {
-            setDemoLoading(false)
+            setInjectionLoading(false)
+        }
+    }
+
+    // Delete all data from databases
+    const handleDeleteAllData = async () => {
+        if (!confirmDelete) {
+            setConfirmDelete(true)
+            toast.warning('Click again to confirm deletion of ALL data!')
+            setTimeout(() => setConfirmDelete(false), 5000) // Reset after 5 seconds
+            return
+        }
+        
+        setDeleteLoading(true)
+        setConfirmDelete(false)
+        toast.info('Deleting all data from Graph and KV stores...')
+        
+        try {
+            const response = await fetch('/api/delete-all-data?confirm=true', {
+                method: 'DELETE'
+            })
+            
+            const data = await response.json()
+            
+            if (response.ok) {
+                toast.success('All data deleted successfully!')
+                setInjectionResult(null)
+                
+                // Refresh stats
+                await fetchGraphStats()
+                await fetchAerospikeStats()
+            } else {
+                toast.error(data.detail || data.message || 'Failed to delete data')
+            }
+        } catch (error) {
+            console.error('Failed to delete data:', error)
+            toast.error('Failed to delete data')
+        } finally {
+            setDeleteLoading(false)
         }
     }
 
@@ -646,100 +695,176 @@ const DataManagement = () => {
                 </CardContent>
             </Card>
 
-            {/* Demo Activity Injection */}
-            <Card className="md:col-span-2 border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20">
+            {/* Historical Transaction Injection */}
+            <Card className="md:col-span-2 border-blue-200 dark:border-blue-800">
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
-                        <AlertTriangle className="h-5 w-5 text-amber-500" />
-                        Inject Demo Activity
-                        <span className="ml-auto text-xs font-normal text-amber-600 bg-amber-100 dark:bg-amber-900/30 px-2 py-1 rounded">
-                            Demo Only
+                        <GitBranch className="h-5 w-5 text-blue-500" />
+                        Inject Historical Transactions
+                        <span className="ml-auto text-xs font-normal text-blue-600 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded">
+                            Step 2: After Bulk Load
                         </span>
                     </CardTitle>
                     <CardDescription>
-                        Create realistic fraud patterns with spread timestamps, high-value transactions, and seed flagged accounts.
-                        This helps bootstrap the fraud detection system with meaningful data.
+                        Generate historical transactions with realistic fraud patterns. Transactions are written to both 
+                        <strong> Graph DB</strong> (for real-time checks) and <strong> KV Store</strong> (for ML feature computation).
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {/* Parameters */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="space-y-2">
-                            <Label htmlFor="txn-count" className="text-sm font-medium">Transactions</Label>
+                            <Label htmlFor="txn-count" className="text-sm font-medium flex items-center gap-2">
+                                Total Transactions
+                                <span className="text-xs text-muted-foreground font-normal">(100 - 100,000)</span>
+                            </Label>
                             <input
                                 id="txn-count"
                                 type="number"
-                                min={10}
-                                max={10000}
-                                value={demoTxnCount}
-                                onChange={(e) => setDemoTxnCount(Number(e.target.value))}
+                                min={100}
+                                max={100000}
+                                value={txnCount}
+                                onChange={(e) => setTxnCount(Number(e.target.value))}
                                 className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
                             />
-                            <p className="text-xs text-muted-foreground">10 - 10,000</p>
+                            <p className="text-xs text-muted-foreground">
+                                How many transactions to create in total
+                            </p>
                         </div>
                         <div className="space-y-2">
-                            <Label htmlFor="spread-days" className="text-sm font-medium">Spread (Days)</Label>
+                            <Label htmlFor="spread-days" className="text-sm font-medium flex items-center gap-2">
+                                Spread Over Days
+                                <span className="text-xs text-muted-foreground font-normal">(1 - 365)</span>
+                            </Label>
                             <input
                                 id="spread-days"
                                 type="number"
                                 min={1}
                                 max={365}
-                                value={demoSpreadDays}
-                                onChange={(e) => setDemoSpreadDays(Number(e.target.value))}
+                                value={spreadDays}
+                                onChange={(e) => setSpreadDays(Number(e.target.value))}
                                 className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
                             />
-                            <p className="text-xs text-muted-foreground">1 - 365 days</p>
+                            <p className="text-xs text-muted-foreground">
+                                Should be ≥ cooldown period (default 7 days)
+                            </p>
                         </div>
                         <div className="space-y-2">
-                            <Label htmlFor="high-value-pct" className="text-sm font-medium">High Value %</Label>
+                            <Label htmlFor="fraud-pct" className="text-sm font-medium flex items-center gap-2">
+                                Fraud Percentage
+                                <span className="text-xs text-muted-foreground font-normal">(0 - 50%)</span>
+                            </Label>
                             <input
-                                id="high-value-pct"
+                                id="fraud-pct"
                                 type="number"
                                 min={0}
-                                max={100}
-                                value={demoHighValuePct}
-                                onChange={(e) => setDemoHighValuePct(Number(e.target.value))}
+                                max={50}
+                                value={fraudPercentage}
+                                onChange={(e) => setFraudPercentage(Number(e.target.value))}
                                 className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
                             />
-                            <p className="text-xs text-muted-foreground">$15K-$100K txns</p>
-                        </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="seed-flagged" className="text-sm font-medium">Seed Flagged</Label>
-                            <input
-                                id="seed-flagged"
-                                type="number"
-                                min={0}
-                                max={20}
-                                value={demoSeedFlagged}
-                                onChange={(e) => setDemoSeedFlagged(Number(e.target.value))}
-                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
-                            />
-                            <p className="text-xs text-muted-foreground">0 - 20 accounts</p>
+                            <p className="text-xs text-muted-foreground">
+                                % of transactions that are fraudulent
+                            </p>
                         </div>
                     </div>
                     
-                    <div className="p-3 bg-amber-100 dark:bg-amber-900/30 rounded-lg text-sm">
-                        <p className="font-medium text-amber-800 dark:text-amber-200 mb-1">What this does:</p>
-                        <ul className="text-amber-700 dark:text-amber-300 space-y-1 list-disc list-inside text-xs">
-                            <li><strong>Normal transactions</strong> ($100-$5K) spread over {demoSpreadDays} days</li>
-                            <li><strong>High-value transactions</strong> ($15K-$100K) in last 3 days → triggers velocity alerts</li>
-                            <li><strong>Seed flagged accounts</strong> → enables "flagged_connections" factor (30 pts)</li>
-                        </ul>
+                    {/* Fraud Patterns Explanation */}
+                    <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg border">
+                        <p className="font-medium text-sm mb-3">Fraud Patterns Generated ({fraudPercentage}% = ~{Math.round(txnCount * fraudPercentage / 100)} transactions):</p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                            <div className="p-2 bg-red-50 dark:bg-red-950/30 rounded border border-red-200 dark:border-red-800">
+                                <p className="font-medium text-red-700 dark:text-red-300">Fraud Rings (40%)</p>
+                                <p className="text-red-600 dark:text-red-400 mt-1">
+                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.4)} txns
+                                </p>
+                                <p className="text-muted-foreground mt-1">
+                                    Tight groups trading among themselves
+                                </p>
+                            </div>
+                            <div className="p-2 bg-orange-50 dark:bg-orange-950/30 rounded border border-orange-200 dark:border-orange-800">
+                                <p className="font-medium text-orange-700 dark:text-orange-300">Velocity Bursts (25%)</p>
+                                <p className="text-orange-600 dark:text-orange-400 mt-1">
+                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.25)} txns
+                                </p>
+                                <p className="text-muted-foreground mt-1">
+                                    30+ transactions in one day
+                                </p>
+                            </div>
+                            <div className="p-2 bg-purple-50 dark:bg-purple-950/30 rounded border border-purple-200 dark:border-purple-800">
+                                <p className="font-medium text-purple-700 dark:text-purple-300">High Amounts (20%)</p>
+                                <p className="text-purple-600 dark:text-purple-400 mt-1">
+                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.2)} txns
+                                </p>
+                                <p className="text-muted-foreground mt-1">
+                                    $15,000 - $100,000 outliers
+                                </p>
+                            </div>
+                            <div className="p-2 bg-blue-50 dark:bg-blue-950/30 rounded border border-blue-200 dark:border-blue-800">
+                                <p className="font-medium text-blue-700 dark:text-blue-300">New Account (15%)</p>
+                                <p className="text-blue-600 dark:text-blue-400 mt-1">
+                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.15)} txns
+                                </p>
+                                <p className="text-muted-foreground mt-1">
+                                    Immediate high activity
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Injection Result */}
+                    {injectionResult && (
+                        <div className="p-3 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-lg">
+                            <p className="text-sm font-medium text-green-800 dark:text-green-200 flex items-center gap-2">
+                                <CheckCircle className="h-4 w-4" />
+                                Injection Complete!
+                            </p>
+                            <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                <div>
+                                    <span className="text-muted-foreground">Normal:</span>{' '}
+                                    <span className="font-medium">{injectionResult.normal_transactions?.toLocaleString()}</span>
+                                </div>
+                                <div>
+                                    <span className="text-muted-foreground">Fraud:</span>{' '}
+                                    <span className="font-medium text-red-600">{injectionResult.fraud_transactions?.toLocaleString()}</span>
+                                </div>
+                                <div>
+                                    <span className="text-muted-foreground">Graph Writes:</span>{' '}
+                                    <span className="font-medium">{injectionResult.graph_writes?.toLocaleString()}</span>
+                                </div>
+                                <div>
+                                    <span className="text-muted-foreground">KV Writes:</span>{' '}
+                                    <span className="font-medium">{injectionResult.kv_writes?.toLocaleString()}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Workflow Guide */}
+                    <div className="p-3 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                        <p className="text-sm font-medium text-blue-800 dark:text-blue-200 mb-2">Testing Workflow:</p>
+                        <ol className="text-xs text-blue-700 dark:text-blue-300 space-y-1 list-decimal list-inside">
+                            <li><strong>Bulk Load</strong> - Load users, accounts, devices (above section)</li>
+                            <li><strong>Inject Transactions</strong> - Generate historical transactions with fraud patterns (this section)</li>
+                            <li><strong>Run Detection</strong> - Go to Fraud Detection tab → Run Manual Detection</li>
+                            <li><strong>Review Flagged</strong> - Check Flagged Accounts tab for detected fraud</li>
+                        </ol>
                     </div>
                     
                     <Button
-                        onClick={handleInjectDemoActivity}
-                        disabled={demoLoading}
-                        className="w-full bg-amber-600 hover:bg-amber-700 text-white"
+                        onClick={handleInjectTransactions}
+                        disabled={injectionLoading || txnCount < 100}
+                        className="w-full"
                     >
-                        {demoLoading ? (
+                        {injectionLoading ? (
                             <>
                                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                Injecting Demo Activity...
+                                Injecting Transactions...
                             </>
                         ) : (
                             <>
                                 <Play className="h-4 w-4 mr-2" />
-                                Inject {demoTxnCount} Demo Transactions
+                                Inject {txnCount.toLocaleString()} Transactions ({fraudPercentage}% Fraud)
                             </>
                         )}
                     </Button>
@@ -892,6 +1017,59 @@ const DataManagement = () => {
                             )}
                         </Button>
                     </div>
+                </CardContent>
+            </Card>
+
+            {/* Clear All Data */}
+            <Card className="md:col-span-2 border-red-200 dark:border-red-800">
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-red-600">
+                        <Trash2 className="h-5 w-5" />
+                        Clear All Data
+                        <span className="ml-auto text-xs font-normal text-red-600 bg-red-100 dark:bg-red-900/30 px-2 py-1 rounded">
+                            Danger Zone
+                        </span>
+                    </CardTitle>
+                    <CardDescription>
+                        Delete all data from both Aerospike Graph and KV Store. This action cannot be undone.
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <div className="p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg">
+                        <h4 className="text-sm font-medium text-red-800 dark:text-red-300 mb-2 flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4" />
+                            This will permanently delete:
+                        </h4>
+                        <ul className="text-sm text-red-700 dark:text-red-400 space-y-1 list-disc list-inside">
+                            <li><strong>Graph DB:</strong> All users, accounts, devices, and transaction edges</li>
+                            <li><strong>KV Store:</strong> All users, transactions, account-facts, device-facts</li>
+                            <li><strong>Flagged Accounts:</strong> All flagged accounts and detection history</li>
+                        </ul>
+                    </div>
+
+                    <Button 
+                        onClick={handleDeleteAllData}
+                        disabled={deleteLoading}
+                        variant="destructive"
+                        className="w-full"
+                    >
+                        {deleteLoading ? (
+                            <>
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                Deleting All Data...
+                            </>
+                        ) : confirmDelete ? (
+                            <>
+                                <AlertTriangle className="h-4 w-4 mr-2" />
+                                Click Again to Confirm Delete
+                            </>
+                        ) : (
+                            <>
+                                <Trash2 className="h-4 w-4 mr-2" />
+                                Delete All Data
+                            </>
+                        )}
+                    </Button>
                 </CardContent>
             </Card>
         </div>

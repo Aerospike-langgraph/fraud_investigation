@@ -122,9 +122,11 @@ interface JobHistoryItem {
     end_time?: string
     status: string
     accounts_evaluated: number
+    users_evaluated?: number
     accounts_skipped_cooldown: number
     newly_flagged: number
     total_accounts: number
+    total_users?: number
     duration_seconds?: number
     error?: string
 }
@@ -145,6 +147,8 @@ const FraudDetection = () => {
     const [historyLoading, setHistoryLoading] = useState(true)
     const [scenarios, setScenarios] = useState<FraudScenario[]>(fraudScenarios)
     const [aerospikeConnected, setAerospikeConnected] = useState<boolean | null>(null)
+    const [computingFeatures, setComputingFeatures] = useState(false)
+    const [featureResult, setFeatureResult] = useState<any>(null)
 
     const toggleScenario = (scenarioId: string) => {
         setScenarios(prev => prev.map(scenario => 
@@ -236,6 +240,32 @@ const FraudDetection = () => {
         }
     }
 
+    // Compute features from KV transactions
+    const handleComputeFeatures = async () => {
+        setComputingFeatures(true)
+        setFeatureResult(null)
+        toast.info(`Computing features with ${config.cooldown_days}-day window...`)
+        
+        try {
+            const response = await fetch(`/api/compute-features?window_days=${config.cooldown_days}`, {
+                method: 'POST'
+            })
+            
+            if (response.ok) {
+                const data = await response.json()
+                setFeatureResult(data)
+                toast.success(`Features computed! ${data.accounts_processed || 0} accounts, ${data.devices_processed || 0} devices.`)
+            } else {
+                const error = await response.json()
+                toast.error(error.detail || 'Feature computation failed')
+            }
+        } catch (error) {
+            toast.error('Error computing features')
+        } finally {
+            setComputingFeatures(false)
+        }
+    }
+
     // Run detection manually
     const handleRunDetection = async () => {
         setRunningDetection(true)
@@ -251,7 +281,7 @@ const FraudDetection = () => {
             
             if (response.ok) {
                 const data = await response.json()
-                toast.success(`Detection completed! ${data.result?.newly_flagged || 0} accounts flagged.`)
+                toast.success(`Detection completed! ${data.result?.newly_flagged || 0} users flagged.`)
                 fetchHistory()
                 fetchConfig()
             } else {
@@ -519,15 +549,100 @@ const FraudDetection = () => {
                     </CardContent>
                 </Card>
 
+                {/* Feature Computation Card */}
+                <Card className="border-purple-200 dark:border-purple-800">
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <TrendingUp className="h-5 w-5 text-purple-500" />
+                            Compute Features
+                            <span className="ml-auto text-xs font-normal text-purple-600 bg-purple-100 dark:bg-purple-900/30 px-2 py-1 rounded">
+                                Step 1: Before Detection
+                            </span>
+                        </CardTitle>
+                        <CardDescription>
+                            Compute account and device features from KV transaction data before running ML detection
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        {/* Explanation */}
+                        <div className="p-4 bg-purple-50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 rounded-lg">
+                            <h4 className="text-sm font-medium text-purple-800 dark:text-purple-300 mb-2">What this computes:</h4>
+                            <div className="grid grid-cols-2 gap-4 text-xs">
+                                <div>
+                                    <p className="font-medium text-purple-700 dark:text-purple-400">Account Features (15):</p>
+                                    <ul className="text-purple-600 dark:text-purple-500 mt-1 space-y-0.5 list-disc list-inside">
+                                        <li>Transaction velocity (7d count, peak, zscore)</li>
+                                        <li>Amount patterns (total, avg, max, zscore)</li>
+                                        <li>Recipient spread (unique, new ratio, entropy)</li>
+                                        <li>Device exposure (count, shared accounts)</li>
+                                        <li>Lifecycle (age, first txn delay)</li>
+                                    </ul>
+                                </div>
+                                <div>
+                                    <p className="font-medium text-purple-700 dark:text-purple-400">Device Features (5):</p>
+                                    <ul className="text-purple-600 dark:text-purple-500 mt-1 space-y-0.5 list-disc list-inside">
+                                        <li>Shared account count</li>
+                                        <li>Flagged account count</li>
+                                        <li>Avg account risk score</li>
+                                        <li>Max account risk score</li>
+                                        <li>Transaction activity</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Feature Result */}
+                        {featureResult && (
+                            <div className="p-3 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-lg">
+                                <p className="text-sm font-medium text-green-800 dark:text-green-200 flex items-center gap-2">
+                                    <CheckCircle className="h-4 w-4" />
+                                    Features Computed Successfully!
+                                </p>
+                                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                                    <div>
+                                        <span className="text-muted-foreground">Accounts:</span>{' '}
+                                        <span className="font-medium">{featureResult.accounts_processed?.toLocaleString()}</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-muted-foreground">Devices:</span>{' '}
+                                        <span className="font-medium">{featureResult.devices_processed?.toLocaleString()}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        <Button 
+                            onClick={handleComputeFeatures} 
+                            disabled={computingFeatures}
+                            className="w-full bg-purple-600 hover:bg-purple-700 text-white"
+                        >
+                            {computingFeatures ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    Computing Features...
+                                </>
+                            ) : (
+                                <>
+                                    <TrendingUp className="h-4 w-4 mr-2" />
+                                    Compute Features ({config.cooldown_days}-day window)
+                                </>
+                            )}
+                        </Button>
+                    </CardContent>
+                </Card>
+
                 {/* Manual Trigger Card */}
                 <Card>
                     <CardHeader>
                         <CardTitle className="flex items-center gap-2">
                             <Zap className="h-5 w-5" />
                             Manual Detection
+                            <span className="ml-auto text-xs font-normal text-blue-600 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded">
+                                Step 2: Run ML Model
+                            </span>
                         </CardTitle>
                         <CardDescription>
-                            Trigger the detection job manually to identify flagged accounts
+                            Trigger the detection job manually to identify flagged accounts using computed features
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
@@ -554,17 +669,18 @@ const FraudDetection = () => {
                         </div>
 
                         {/* What happens when you run */}
-                        <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg">
-                            <h4 className="text-sm font-medium text-amber-800 dark:text-amber-300 mb-2 flex items-center gap-2">
-                                <AlertTriangle className="h-4 w-4" />
+                        <div className="p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                            <h4 className="text-sm font-medium text-blue-800 dark:text-blue-300 mb-2 flex items-center gap-2">
+                                <Eye className="h-4 w-4" />
                                 What happens when detection runs:
                             </h4>
-                            <ul className="text-sm text-amber-700 dark:text-amber-400 space-y-1 list-disc list-inside">
-                                <li>Fetches all accounts from the database</li>
-                                <li>Skips accounts still in cooldown period {skipCooldown && <span className="text-green-600 font-medium">(disabled)</span>}</li>
-                                <li>Extracts features and calls ML model</li>
-                                <li>Flags accounts above risk threshold</li>
-                            </ul>
+                            <ol className="text-sm text-blue-700 dark:text-blue-400 space-y-1 list-decimal list-inside">
+                                <li>Fetches accounts from <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">account-fact</code> KV set</li>
+                                <li>Filters accounts in cooldown period {skipCooldown && <span className="text-green-600 font-medium">(disabled)</span>}</li>
+                                <li>Reads pre-computed features for each account</li>
+                                <li>Calls ML rule-based model for risk scoring</li>
+                                <li>Flags accounts above <strong>{config.risk_threshold}</strong> risk threshold</li>
+                            </ol>
                         </div>
 
                         {/* Skip Cooldown Option */}
@@ -648,19 +764,19 @@ const FraudDetection = () => {
                                         <TableHead className="text-center">
                                             <span className="flex items-center justify-center gap-1">
                                                 <Users className="h-4 w-4" />
-                                                Evaluated
+                                                Users Evaluated
                                             </span>
                                         </TableHead>
                                         <TableHead className="text-center">
                                             <span className="flex items-center justify-center gap-1">
                                                 <Timer className="h-4 w-4" />
-                                                Skipped
+                                                Users Skipped
                                             </span>
                                         </TableHead>
                                         <TableHead className="text-center">
                                             <span className="flex items-center justify-center gap-1">
                                                 <TrendingUp className="h-4 w-4" />
-                                                Flagged
+                                                Users Flagged
                                             </span>
                                         </TableHead>
                                         <TableHead className="text-right">Duration</TableHead>
@@ -694,7 +810,7 @@ const FraudDetection = () => {
                                                 )}
                                             </TableCell>
                                             <TableCell className="text-center">
-                                                {job.accounts_evaluated.toLocaleString()}
+                                                {(job.users_evaluated ?? job.accounts_evaluated).toLocaleString()}
                                             </TableCell>
                                             <TableCell className="text-center text-muted-foreground">
                                                 {job.accounts_skipped_cooldown.toLocaleString()}
