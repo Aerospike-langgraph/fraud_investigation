@@ -100,6 +100,41 @@ class MLModelService:
         """
         self.last_prediction_time = datetime.now()
         
+        # Map long feature names (from DB) to short names (used internally)
+        # This handles both naming conventions
+        name_map = {
+            # Velocity features
+            'txn_out_count_7d': 'txn_out_7d',
+            'txn_out_count_24h_peak': 'txn_24h_peak',
+            'avg_txn_per_day_7d': 'avg_txn_day',
+            'max_txn_per_hour_7d': 'max_txn_hr',
+            'transaction_zscore': 'txn_zscore',
+            # Amount features
+            'total_out_amount_7d': 'out_amt_7d',
+            'avg_out_amount_7d': 'avg_out_amt',
+            'max_out_amount_7d': 'max_out_amt',
+            'amount_zscore_7d': 'amt_zscore',
+            # Counterparty features
+            'unique_recipients_7d': 'uniq_recip',
+            'new_recipient_ratio_7d': 'new_recip_rat',
+            'recipient_entropy_7d': 'recip_entropy',
+            # Device features
+            'device_count_7d': 'dev_count',
+            'shared_device_account_count_7d': 'shared_dev_ct',
+            # Lifecycle features
+            'account_age_days': 'acct_age_days',
+            'first_txn_delay_days': 'first_txn_dly',
+        }
+        
+        # Normalize feature names - accept both long and short names
+        normalized = {}
+        for key, value in features.items():
+            # If it's a long name, map to short name
+            if key in name_map:
+                normalized[name_map[key]] = value
+            else:
+                normalized[key] = value
+        
         risk_factors = []
         category_scores = {
             'velocity': 0,
@@ -110,9 +145,9 @@ class MLModelService:
         }
         
         # A. Velocity signals (max 30 pts)
-        txn_out = features.get('txn_out_7d', 0) or 0
-        txn_24h_peak = features.get('txn_24h_peak', 0) or 0
-        txn_zscore = features.get('txn_zscore', 0) or 0
+        txn_out = normalized.get('txn_out_7d', 0) or 0
+        txn_24h_peak = normalized.get('txn_24h_peak', 0) or 0
+        txn_zscore = normalized.get('txn_zscore', 0) or 0
         
         if txn_out > self.thresholds['txn_out_high']:
             category_scores['velocity'] += 15
@@ -127,9 +162,9 @@ class MLModelService:
             risk_factors.append(f"Unusual transaction velocity (z={txn_zscore:.1f})")
         
         # B. Amount signals (max 25 pts)
-        max_out_amt = features.get('max_out_amt', 0) or 0
-        avg_out_amt = features.get('avg_out_amt', 0) or 0
-        amt_zscore = features.get('amt_zscore', 0) or 0
+        max_out_amt = normalized.get('max_out_amt', 0) or 0
+        avg_out_amt = normalized.get('avg_out_amt', 0) or 0
+        amt_zscore = normalized.get('amt_zscore', 0) or 0
         
         if max_out_amt > self.thresholds['max_out_amt_high']:
             category_scores['amount'] += 10
@@ -144,9 +179,9 @@ class MLModelService:
             risk_factors.append(f"Unusual amount pattern (z={amt_zscore:.1f})")
         
         # C. Counterparty signals (max 25 pts)
-        uniq_recip = features.get('uniq_recip', 0) or 0
-        new_recip_rat = features.get('new_recip_rat', 0) or 0
-        recip_entropy = features.get('recip_entropy', 0) or 0
+        uniq_recip = normalized.get('uniq_recip', 0) or 0
+        new_recip_rat = normalized.get('new_recip_rat', 0) or 0
+        recip_entropy = normalized.get('recip_entropy', 0) or 0
         
         if uniq_recip > self.thresholds['unique_recipients_high']:
             category_scores['counterparty'] += 10
@@ -161,8 +196,8 @@ class MLModelService:
             risk_factors.append(f"Fan-out pattern (entropy={recip_entropy:.2f})")
         
         # D. Device signals (max 15 pts)
-        dev_count = features.get('dev_count', 1) or 1
-        shared_dev_ct = features.get('shared_dev_ct', 0) or 0
+        dev_count = normalized.get('dev_count', 1) or 1
+        shared_dev_ct = normalized.get('shared_dev_ct', 0) or 0
         
         if dev_count > self.thresholds['device_count_high']:
             category_scores['device'] += 10
@@ -173,8 +208,8 @@ class MLModelService:
             risk_factors.append(f"Shared device exposure ({shared_dev_ct} accounts)")
         
         # E. Lifecycle signals (max 20 pts)
-        acct_age_days = features.get('acct_age_days', 365) or 365
-        first_txn_dly = features.get('first_txn_dly', 30) or 30
+        acct_age_days = normalized.get('acct_age_days', 365) or 365
+        first_txn_dly = normalized.get('first_txn_dly', 30) or 30
         
         if acct_age_days < self.thresholds['new_account_days'] and txn_out > self.thresholds['new_account_txn_threshold']:
             category_scores['lifecycle'] += 15
@@ -196,7 +231,7 @@ class MLModelService:
             reason = "Normal account activity"
         
         # Calculate confidence based on feature completeness
-        feature_count = sum(1 for v in features.values() if v is not None and v != 0)
+        feature_count = sum(1 for v in normalized.values() if v is not None and v != 0)
         confidence = min(0.95, 0.5 + (feature_count * 0.03))
         
         return {

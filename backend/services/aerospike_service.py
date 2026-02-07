@@ -64,6 +64,8 @@ BIN_NAME_MAP = {
     'current_risk_score': 'curr_risk_score',
     'assigned_analyst': 'assigned_anlst',
     'account_holder': 'acct_holder',
+    'account_predictions': 'acct_preds',
+    'highest_risk_account_id': 'high_risk_acct',
     # Account-fact bins (15 char limit)
     'txn_out_count_7d': 'txn_out_7d',
     'txn_out_count_24h_peak': 'txn_24h_peak',
@@ -649,15 +651,20 @@ class AerospikeService:
     # ----------------------------------------------------------------------------------------------------------
     
     def flag_account(self, account_data: Dict[str, Any]) -> bool:
-        """Store a flagged account record."""
-        account_id = account_data.get('account_id')
-        if not account_id:
+        """Store a flagged account record.
+        
+        Uses user_id as the key since flagging is user-level (a user may have multiple accounts).
+        The account_id field stores the highest risk account ID for reference.
+        """
+        # Use user_id as the key (flagging is user-level, not account-level)
+        user_id = account_data.get('user_id')
+        if not user_id:
             return False
         
         account_data["flagged_date"] = datetime.now().isoformat()
         account_data["status"] = account_data.get("status", "pending_review")
         
-        return self.put(SET_FLAGGED_ACCOUNTS, account_id, account_data)
+        return self.put(SET_FLAGGED_ACCOUNTS, user_id, account_data)
     
     def get_flagged_account(self, account_id: str) -> Optional[Dict[str, Any]]:
         """Get a flagged account by ID."""

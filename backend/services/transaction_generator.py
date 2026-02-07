@@ -195,9 +195,23 @@ class TransactionGeneratorService:
             if from_id == to_id:
                 raise Exception("Source and destination accounts cannot be the same")
 
+            # Get sender's user and their devices for device tracking
+            device_id = None
+            try:
+                # Account -> User (via reverse OWNS edge)
+                user_ids = self.graph_service.client.V(from_id).in_("OWNS").id_().toList()
+                if user_ids:
+                    user_id = user_ids[0]
+                    # User -> Devices (via USES edge)
+                    user_devices = self.graph_service.client.V(user_id).out("USES").id_().toList()
+                    if user_devices:
+                        device_id = random.choice(user_devices)
+            except Exception as e:
+                logger.debug(f"Could not get device for transaction: {e}")
+
             # Create transaction
             txn_id = str(uuid.uuid4())
-            edge_id = (self.graph_service.client.V(from_id)
+            edge_builder = (self.graph_service.client.V(from_id)
                 .addE("TRANSACTS")
                 .to(__.V(to_id))
                 .property("txn_id", txn_id)
@@ -208,9 +222,13 @@ class TransactionGeneratorService:
                 .property("location", random.choice(self.normal_locations))
                 .property("timestamp", datetime.now().isoformat())
                 .property("status", "completed")
-                .property("gen_type", gen_type)
-                .id_()
-                .next())
+                .property("gen_type", gen_type))
+            
+            # Add device_id if available
+            if device_id:
+                edge_builder = edge_builder.property("device_id", device_id)
+            
+            edge_id = edge_builder.id_().next()
             
             self.transaction_counter += 1
             logger.info(f"✅ Transaction {txn_id} stored in graph database with both sender and receiver edges")

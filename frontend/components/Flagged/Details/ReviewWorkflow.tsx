@@ -36,6 +36,11 @@ interface AISubStep {
     icon?: React.ReactNode
 }
 
+interface AccountPrediction {
+    account_id: string
+    risk_score: number
+}
+
 interface Props {
     currentStep: number
     onStepChange: (step: number) => void
@@ -47,6 +52,9 @@ interface Props {
     toolCalls?: ToolCall[]
     traceEvents?: TraceEvent[]
     getStepStatus?: (stepId: string) => 'pending' | 'running' | 'completed'
+    // Account data for per-account decisions
+    accountPredictions?: AccountPrediction[]
+    highestRiskAccountId?: string
 }
 
 const workflowSteps = [
@@ -95,9 +103,72 @@ const ReviewWorkflow = ({
     currentNode = '',
     toolCalls = [],
     traceEvents = [],
-    getStepStatus
+    getStepStatus,
+    accountPredictions = [],
+    highestRiskAccountId = ''
 }: Props) => {
     const [notes, setNotes] = useState('')
+    // Per-account decisions: { account_id: 'fraud' | 'safe' | null }
+    const [accountDecisions, setAccountDecisions] = useState<Record<string, 'fraud' | 'safe' | null>>({})
+    const [submitting, setSubmitting] = useState(false)
+    const [submitResults, setSubmitResults] = useState<Record<string, { success: boolean; message: string; devices_flagged?: string[] }>>({})
+    
+    // Filter to high-risk accounts (risk_score >= 50)
+    const highRiskAccounts = accountPredictions.filter(p => p.risk_score >= 50)
+    
+    // Check if all high-risk accounts have decisions
+    const allAccountsDecided = highRiskAccounts.length > 0 && 
+        highRiskAccounts.every(acc => accountDecisions[acc.account_id] != null)
+    
+    // Handle per-account decision
+    const handleAccountDecision = (accountId: string, decision: 'fraud' | 'safe') => {
+        setAccountDecisions(prev => ({
+            ...prev,
+            [accountId]: prev[accountId] === decision ? null : decision
+        }))
+    }
+    
+    // Submit all account decisions
+    const handleSubmitDecisions = async () => {
+        setSubmitting(true)
+        const results: Record<string, { success: boolean; message: string; devices_flagged?: string[] }> = {}
+        
+        for (const account of highRiskAccounts) {
+            const decision = accountDecisions[account.account_id]
+            if (!decision) continue
+            
+            try {
+                const resolution = decision === 'fraud' ? 'confirmed_fraud' : 'cleared'
+                const response = await fetch(
+                    `/api/accounts/${account.account_id}/resolve?resolution=${resolution}&notes=${encodeURIComponent(notes)}`,
+                    { method: 'POST' }
+                )
+                
+                if (response.ok) {
+                    const data = await response.json()
+                    results[account.account_id] = {
+                        success: true,
+                        message: `Account ${decision === 'fraud' ? 'confirmed as fraud' : 'cleared'}`,
+                        devices_flagged: data.result?.devices_flagged || []
+                    }
+                } else {
+                    const error = await response.json()
+                    results[account.account_id] = {
+                        success: false,
+                        message: error.detail || 'Failed to resolve account'
+                    }
+                }
+            } catch (error) {
+                results[account.account_id] = {
+                    success: false,
+                    message: `Error: ${error}`
+                }
+            }
+        }
+        
+        setSubmitResults(results)
+        setSubmitting(false)
+    }
     const [decision, setDecision] = useState<'fraud' | 'safe' | null>(null)
     const [showToolCalls, setShowToolCalls] = useState(false)
 
@@ -355,92 +426,124 @@ const ReviewWorkflow = ({
                             Final Decision
                         </CardTitle>
                         <CardDescription className="text-slate-500">
-                            Based on your analysis, make a determination for this account
+                            Make a determination for each high-risk account. Devices used in fraudulent transactions will be automatically flagged.
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-6">
-                        {/* Decision Buttons */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <button
-                                onClick={() => setDecision('fraud')}
-                                className={cn(
-                                    "p-6 rounded-lg border-2 transition-all text-left",
-                                    decision === 'fraud'
-                                        ? 'border-red-500 bg-red-50'
-                                        : 'border-slate-200 hover:border-red-300 hover:bg-red-50/50'
-                                )}
-                            >
-                                <div className="flex items-center gap-3">
-                                    <div className={cn(
-                                        "p-3 rounded-full",
-                                        decision === 'fraud' 
-                                            ? 'bg-red-500 text-white' 
-                                            : 'bg-red-100 text-red-600'
-                                    )}>
-                                        <Ban className="h-6 w-6" />
-                                    </div>
-                                    <div>
-                                        <h4 className="font-semibold text-lg text-slate-900">Mark as Fraud</h4>
-                                        <p className="text-sm text-slate-500">
-                                            Confirm fraudulent activity detected
-                                        </p>
-                                    </div>
-                                </div>
-                                {decision === 'fraud' && (
-                                    <div className="mt-4 p-3 bg-red-100 rounded-lg">
-                                        <p className="text-sm text-red-800">
-                                            <strong>Actions to be taken:</strong>
-                                        </p>
-                                        <ul className="text-sm text-red-700 mt-1 space-y-1">
-                                            <li>• Account will be frozen immediately</li>
-                                            <li>• Notify account holder via email</li>
-                                            <li>• Generate fraud investigation report</li>
-                                            <li>• Flag linked accounts for review</li>
-                                        </ul>
-                                    </div>
-                                )}
-                            </button>
-
-                            <button
-                                onClick={() => setDecision('safe')}
-                                className={cn(
-                                    "p-6 rounded-lg border-2 transition-all text-left",
-                                    decision === 'safe'
-                                        ? 'border-emerald-500 bg-emerald-50'
-                                        : 'border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50'
-                                )}
-                            >
-                                <div className="flex items-center gap-3">
-                                    <div className={cn(
-                                        "p-3 rounded-full",
-                                        decision === 'safe' 
-                                            ? 'bg-emerald-500 text-white' 
-                                            : 'bg-emerald-100 text-emerald-600'
-                                    )}>
-                                        <ThumbsUp className="h-6 w-6" />
-                                    </div>
-                                    <div>
-                                        <h4 className="font-semibold text-lg text-slate-900">Mark as Safe</h4>
-                                        <p className="text-sm text-slate-500">
-                                            Clear account - no fraud detected
-                                        </p>
-                                    </div>
-                                </div>
-                                {decision === 'safe' && (
-                                    <div className="mt-4 p-3 bg-emerald-100 rounded-lg">
-                                        <p className="text-sm text-emerald-800">
-                                            <strong>Actions to be taken:</strong>
-                                        </p>
-                                        <ul className="text-sm text-emerald-700 mt-1 space-y-1">
-                                            <li>• Remove fraud flag from account</li>
-                                            <li>• Update risk score accordingly</li>
-                                            <li>• Document false positive for ML training</li>
-                                            <li>• Notify account holder of clearance</li>
-                                        </ul>
-                                    </div>
-                                )}
-                            </button>
-                        </div>
+                        {/* Per-Account Decisions */}
+                        {highRiskAccounts.length > 0 ? (
+                            <div className="space-y-4">
+                                <h4 className="font-medium text-slate-700 flex items-center gap-2">
+                                    <AlertTriangle className="h-4 w-4 text-amber-500" />
+                                    High Risk Accounts ({highRiskAccounts.length})
+                                </h4>
+                                
+                                {highRiskAccounts.map((account) => {
+                                    const decision = accountDecisions[account.account_id]
+                                    const result = submitResults[account.account_id]
+                                    const isHighest = account.account_id === highestRiskAccountId
+                                    
+                                    return (
+                                        <div 
+                                            key={account.account_id}
+                                            className={cn(
+                                                "p-4 rounded-lg border-2 transition-all",
+                                                result?.success && decision === 'fraud' && "border-red-300 bg-red-50",
+                                                result?.success && decision === 'safe' && "border-emerald-300 bg-emerald-50",
+                                                !result && "border-slate-200 bg-slate-50"
+                                            )}
+                                        >
+                                            <div className="flex items-center justify-between mb-3">
+                                                <div className="flex items-center gap-3">
+                                                    <span className="font-mono font-semibold text-slate-900">
+                                                        {account.account_id}
+                                                    </span>
+                                                    {isHighest && (
+                                                        <Badge variant="destructive" className="text-xs">
+                                                            Highest Risk
+                                                        </Badge>
+                                                    )}
+                                                    <Badge 
+                                                        variant={account.risk_score >= 70 ? "destructive" : "secondary"}
+                                                        className="text-xs"
+                                                    >
+                                                        Risk: {account.risk_score.toFixed(1)}
+                                                    </Badge>
+                                                </div>
+                                                
+                                                {result && (
+                                                    <Badge 
+                                                        variant={result.success ? "default" : "destructive"}
+                                                        className={cn(
+                                                            "text-xs",
+                                                            result.success && decision === 'fraud' && "bg-red-600",
+                                                            result.success && decision === 'safe' && "bg-emerald-600"
+                                                        )}
+                                                    >
+                                                        {result.success ? (decision === 'fraud' ? 'Confirmed Fraud' : 'Cleared') : 'Error'}
+                                                    </Badge>
+                                                )}
+                                            </div>
+                                            
+                                            {/* Decision buttons for this account */}
+                                            {!result && (
+                                                <div className="flex gap-2">
+                                                    <Button
+                                                        size="sm"
+                                                        variant={decision === 'fraud' ? 'destructive' : 'outline'}
+                                                        onClick={() => handleAccountDecision(account.account_id, 'fraud')}
+                                                        disabled={submitting}
+                                                        className={cn(
+                                                            "flex-1",
+                                                            decision === 'fraud' && "bg-red-600 hover:bg-red-700"
+                                                        )}
+                                                    >
+                                                        <Ban className="h-4 w-4 mr-1" />
+                                                        Mark as Fraud
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant={decision === 'safe' ? 'default' : 'outline'}
+                                                        onClick={() => handleAccountDecision(account.account_id, 'safe')}
+                                                        disabled={submitting}
+                                                        className={cn(
+                                                            "flex-1",
+                                                            decision === 'safe' && "bg-emerald-600 hover:bg-emerald-700"
+                                                        )}
+                                                    >
+                                                        <ThumbsUp className="h-4 w-4 mr-1" />
+                                                        Mark as Safe
+                                                    </Button>
+                                                </div>
+                                            )}
+                                            
+                                            {/* Show result details */}
+                                            {result && (
+                                                <div className={cn(
+                                                    "mt-2 p-2 rounded text-sm",
+                                                    result.success ? "bg-white/50" : "bg-red-100"
+                                                )}>
+                                                    <p className={result.success ? "text-slate-600" : "text-red-700"}>
+                                                        {result.message}
+                                                    </p>
+                                                    {result.devices_flagged && result.devices_flagged.length > 0 && (
+                                                        <p className="text-slate-500 mt-1">
+                                                            Devices flagged: {result.devices_flagged.join(', ')}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        ) : (
+                            <div className="text-center py-8 text-slate-500">
+                                <Shield className="h-12 w-12 mx-auto mb-3 text-slate-300" />
+                                <p>No high-risk accounts found for this user.</p>
+                                <p className="text-sm mt-1">All accounts have risk scores below the threshold.</p>
+                            </div>
+                        )}
 
                         {/* Notes Section */}
                         <div className="space-y-2">
@@ -449,20 +552,61 @@ const ReviewWorkflow = ({
                                 Investigation Notes
                             </label>
                             <textarea
-                                className="w-full min-h-[120px] p-3 border border-slate-200 rounded-lg bg-white resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900 placeholder:text-slate-400"
-                                placeholder="Document your findings and reasoning for this decision..."
+                                className="w-full min-h-[100px] p-3 border border-slate-200 rounded-lg bg-white resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-900 placeholder:text-slate-400"
+                                placeholder="Document your findings and reasoning for these decisions..."
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
+                                disabled={submitting}
                             />
                         </div>
 
-                        {/* Warning for incomplete */}
-                        {!decision && (
-                            <div className="flex items-center gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200">
-                                <AlertTriangle className="h-5 w-5 text-amber-600" />
-                                <p className="text-sm text-amber-800">
-                                    Please select a decision above before submitting
+                        {/* Submit Button */}
+                        {highRiskAccounts.length > 0 && Object.keys(submitResults).length === 0 && (
+                            <div className="space-y-3">
+                                {!allAccountsDecided && (
+                                    <div className="flex items-center gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                                        <AlertTriangle className="h-5 w-5 text-amber-600" />
+                                        <p className="text-sm text-amber-800">
+                                            Please make a decision for all high-risk accounts before submitting
+                                        </p>
+                                    </div>
+                                )}
+                                
+                                <Button
+                                    onClick={handleSubmitDecisions}
+                                    disabled={!allAccountsDecided || submitting}
+                                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-300"
+                                >
+                                    {submitting ? (
+                                        <>
+                                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                            Submitting Decisions...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <CheckCircle className="h-4 w-4 mr-2" />
+                                            Submit All Decisions
+                                        </>
+                                    )}
+                                </Button>
+                            </div>
+                        )}
+                        
+                        {/* Summary after submission */}
+                        {Object.keys(submitResults).length > 0 && (
+                            <div className="p-4 bg-slate-100 rounded-lg">
+                                <h4 className="font-medium text-slate-900 mb-2 flex items-center gap-2">
+                                    <CheckCircle className="h-5 w-5 text-emerald-600" />
+                                    Decisions Submitted
+                                </h4>
+                                <p className="text-sm text-slate-600">
+                                    {Object.values(submitResults).filter(r => r.success).length} of {Object.keys(submitResults).length} accounts processed successfully.
                                 </p>
+                                {Object.values(submitResults).some(r => r.devices_flagged && r.devices_flagged.length > 0) && (
+                                    <p className="text-sm text-slate-500 mt-1">
+                                        Devices connected to fraudulent accounts have been flagged in both Graph DB and KV store.
+                                    </p>
+                                )}
                             </div>
                         )}
                     </CardContent>

@@ -1128,6 +1128,53 @@ def resolve_flagged_account(
         raise HTTPException(status_code=500, detail=f"Failed to resolve account: {str(e)}")
 
 
+@app.post("/accounts/{account_id}/resolve")
+def resolve_individual_account(
+    account_id: str = Path(..., description="Account ID (e.g., A000401)"),
+    resolution: str = Query(..., description="Resolution: confirmed_fraud or cleared"),
+    notes: str = Query("", description="Resolution notes")
+):
+    """
+    Resolve an individual account (account-level, not user-level).
+    
+    When confirmed_fraud:
+    - Updates account's fraud_flag in Graph DB
+    - Updates account-fact in KV with fraud=True
+    - Flags all devices used in this account's transactions in both Graph and KV
+    
+    When cleared:
+    - Updates account's fraud_flag=False in Graph DB
+    - Updates account-fact in KV with fraud=False
+    
+    This endpoint is used by the fraud investigation review workflow to make
+    per-account fraud decisions after AI investigation.
+    """
+    try:
+        if resolution not in ["confirmed_fraud", "cleared"]:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid resolution. Must be 'confirmed_fraud' or 'cleared'"
+            )
+        
+        result = flagged_account_service.resolve_account(account_id, resolution, notes)
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to resolve account: {', '.join(result.get('errors', ['Unknown error']))}"
+            )
+        
+        return {
+            "message": f"Account {account_id} resolved as {resolution}",
+            "result": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to resolve account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to resolve account: {str(e)}")
+
+
 @app.post("/flagged-accounts/detect")
 def trigger_detection_job(
     skip_cooldown: bool = Query(False, description="Skip cooldown period and evaluate all users")

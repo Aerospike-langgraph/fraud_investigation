@@ -193,9 +193,23 @@ class TransactionInjector:
         graph_success = False
         kv_success = False
         
+        # Get sender's user and their devices for device tracking
+        device_id = None
+        try:
+            # Account -> User (via reverse OWNS edge)
+            user_ids = self.graph.client.V(sender_id).in_("OWNS").id_().toList()
+            if user_ids:
+                user_id = user_ids[0]
+                # User -> Devices (via USES edge)
+                user_devices = self.graph.client.V(user_id).out("USES").id_().toList()
+                if user_devices:
+                    device_id = random.choice(user_devices)
+        except Exception as e:
+            logger.debug(f"Could not get device for transaction: {e}")
+        
         # Write to Graph
         try:
-            self.graph.client.V(sender_id) \
+            edge_builder = self.graph.client.V(sender_id) \
                 .addE("TRANSACTS") \
                 .to(__.V(receiver_id)) \
                 .property("txn_id", txn_id) \
@@ -206,8 +220,13 @@ class TransactionInjector:
                 .property("location", location) \
                 .property("timestamp", timestamp) \
                 .property("status", "completed") \
-                .property("gen_type", "HISTORICAL_FRAUD" if is_fraud else "HISTORICAL") \
-                .iterate()
+                .property("gen_type", "HISTORICAL_FRAUD" if is_fraud else "HISTORICAL")
+            
+            # Add device_id if available
+            if device_id:
+                edge_builder = edge_builder.property("device_id", device_id)
+            
+            edge_builder.iterate()
             graph_success = True
         except Exception as e:
             logger.warning(f"Error writing transaction to graph: {e}")
@@ -222,6 +241,7 @@ class TransactionInjector:
                 "location": location,
                 "timestamp": timestamp,
                 "status": "completed",
+                "device_id": device_id,  # Include device_id in KV record
             }
             
             # Sender's outgoing transaction

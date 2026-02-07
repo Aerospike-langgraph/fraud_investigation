@@ -33,10 +33,13 @@ interface FlaggedAccount {
     flag_reason: string
     flagged_date: string
     status: string
-    suspicious_transactions: number
-    total_flagged_amount: number
+    suspicious_transactions?: number
+    total_flagged_amount?: number
+    account_count?: number
     features?: Record<string, any>
     risk_factors?: string[]
+    account_predictions?: Array<{ account_id: string; risk_score: number }>
+    highest_risk_account_id?: string
 }
 
 interface FlaggedStats {
@@ -345,18 +348,16 @@ export default function FlaggedAccountsPage() {
                                                     <p className="text-xs text-muted-foreground">Risk Score</p>
                                                 </div>
                                                 <div className="text-center">
-                                                    <p className="text-2xl font-bold">{account.suspicious_transactions}</p>
-                                                    <p className="text-xs text-muted-foreground">Suspicious Txns</p>
-                                                </div>
-                                                <div className="text-center">
-                                                    <p className="text-2xl font-bold">${account.total_flagged_amount.toLocaleString()}</p>
-                                                    <p className="text-xs text-muted-foreground">Flagged Amount</p>
+                                                    <p className="text-2xl font-bold text-destructive">
+                                                        {account.account_predictions?.filter(p => p.risk_score >= 50).length ?? 0}
+                                                    </p>
+                                                    <p className="text-xs text-muted-foreground">High Risk Accounts</p>
                                                 </div>
                                             </div>
 
                                             {/* Right Section - Action */}
                                             <div className="flex items-center">
-                                                <Link href={`/flagged/${account.account_id}`}>
+                                                <Link href={`/flagged/${account.user_id}`}>
                                                     <Button>
                                                         <Eye className="h-4 w-4 mr-2" />
                                                         Review

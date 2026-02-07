@@ -287,78 +287,110 @@ export default function FlaggedAccountDetailsPage() {
                                 </CardContent>
                             </Card>
 
-                            {/* Account & User Info */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <Card className="bg-white border-slate-200 shadow-sm">
-                                    <CardHeader>
-                                        <CardTitle className="text-lg flex items-center gap-2 text-slate-900">
-                                            <CreditCard className="h-5 w-5 text-slate-600" />
-                                            Account Information
-                                        </CardTitle>
-                                    </CardHeader>
-                                    <CardContent className="space-y-3">
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Account ID</span>
-                                            <span className="font-medium text-slate-900">{account.id}</span>
+                            {/* Account Holder Info */}
+                            <Card className="bg-white border-slate-200 shadow-sm">
+                                <CardHeader>
+                                    <CardTitle className="text-lg flex items-center gap-2 text-slate-900">
+                                        <User className="h-5 w-5 text-slate-600" />
+                                        Account Holder
+                                    </CardTitle>
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        <div>
+                                            <span className="text-slate-500 text-sm">Name</span>
+                                            <p className="font-medium text-slate-900">{account.user.name}</p>
                                         </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Bank</span>
-                                            <span className="font-medium text-slate-900">{account.bank_name}</span>
+                                        <div>
+                                            <span className="text-slate-500 text-sm">Email</span>
+                                            <p className="font-medium text-sm text-slate-900">{account.user.email}</p>
                                         </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Type</span>
-                                            <span className="font-medium text-slate-900">{account.account_type}</span>
+                                        <div>
+                                            <span className="text-slate-500 text-sm">Phone</span>
+                                            <p className="font-medium text-slate-900">{account.user.phone}</p>
                                         </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Account Number</span>
-                                            <span className="font-medium text-slate-900">{account.account_number}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Current Balance</span>
-                                            <span className="font-medium text-slate-900">${account.balance.toLocaleString()}</span>
-                                        </div>
-                                        {account.created_date && (
-                                            <div className="flex justify-between">
-                                                <span className="text-slate-500">Created</span>
-                                                <span className="font-medium text-slate-900">{new Date(account.created_date).toLocaleDateString()}</span>
-                                            </div>
-                                        )}
-                                    </CardContent>
-                                </Card>
-
-                                <Card className="bg-white border-slate-200 shadow-sm">
-                                    <CardHeader>
-                                        <CardTitle className="text-lg flex items-center gap-2 text-slate-900">
-                                            <User className="h-5 w-5 text-slate-600" />
-                                            Account Holder
-                                        </CardTitle>
-                                    </CardHeader>
-                                    <CardContent className="space-y-3">
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Name</span>
-                                            <span className="font-medium text-slate-900">{account.user.name}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Email</span>
-                                            <span className="font-medium text-sm text-slate-900">{account.user.email}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Phone</span>
-                                            <span className="font-medium text-slate-900">{account.user.phone}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-slate-500">Location</span>
-                                            <span className="font-medium text-slate-900">{account.user.location}</span>
+                                        <div>
+                                            <span className="text-slate-500 text-sm">Location</span>
+                                            <p className="font-medium text-slate-900">{account.user.location}</p>
                                         </div>
                                         {account.user.signup_date && (
-                                            <div className="flex justify-between">
-                                                <span className="text-slate-500">Member Since</span>
-                                                <span className="font-medium text-slate-900">{new Date(account.user.signup_date).toLocaleDateString()}</span>
+                                            <div>
+                                                <span className="text-slate-500 text-sm">Member Since</span>
+                                                <p className="font-medium text-slate-900">{new Date(account.user.signup_date).toLocaleDateString()}</p>
                                             </div>
                                         )}
-                                    </CardContent>
-                                </Card>
-                            </div>
+                                    </div>
+                                </CardContent>
+                            </Card>
+
+                            {/* High Risk Accounts */}
+                            <Card className="bg-white border-slate-200 shadow-sm">
+                                <CardHeader>
+                                    <CardTitle className="text-lg flex items-center gap-2 text-slate-900">
+                                        <CreditCard className="h-5 w-5 text-slate-600" />
+                                        High Risk Accounts ({account.high_risk_accounts?.length || 0})
+                                    </CardTitle>
+                                    <CardDescription className="text-slate-500">
+                                        Accounts with risk score ≥ 50
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                    {account.high_risk_accounts && account.high_risk_accounts.length > 0 ? (
+                                        <div className="space-y-4">
+                                            {account.high_risk_accounts.map((acc: any) => {
+                                                const accId = acc.id || acc['1'] || 'Unknown'
+                                                const prediction = account.account_predictions?.find(p => p.account_id === accId)
+                                                const isHighest = accId === account.highest_risk_account_id
+                                                return (
+                                                    <div 
+                                                        key={accId} 
+                                                        className={`p-4 rounded-lg border ${isHighest ? 'border-red-300 bg-red-50' : 'border-slate-200 bg-slate-50'}`}
+                                                    >
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-semibold text-slate-900">{accId}</span>
+                                                                {isHighest && (
+                                                                    <span className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200">
+                                                                        HIGHEST RISK
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-1">
+                                                                <TrendingUp className="h-4 w-4 text-red-600" />
+                                                                <span className="font-bold text-red-600">
+                                                                    {prediction?.risk_score?.toFixed(1) ?? 'N/A'}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                                                            <div>
+                                                                <span className="text-slate-500">Bank</span>
+                                                                <p className="font-medium text-slate-900">{acc.bank_name || 'N/A'}</p>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-500">Type</span>
+                                                                <p className="font-medium text-slate-900">{acc.type || 'N/A'}</p>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-500">Balance</span>
+                                                                <p className="font-medium text-slate-900">${(acc.balance ?? 0).toLocaleString()}</p>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-500">Status</span>
+                                                                <p className="font-medium text-slate-900">{acc.status || 'N/A'}</p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <div className="text-center text-slate-500 py-4">
+                                            No high-risk accounts found
+                                        </div>
+                                    )}
+                                </CardContent>
+                            </Card>
                         </TabsContent>
 
                         {/* Investigation Tab - Now shows only the report */}
@@ -408,7 +440,7 @@ export default function FlaggedAccountDetailsPage() {
                                         Recent Transactions
                                     </CardTitle>
                                     <CardDescription className="text-slate-500">
-                                        Transaction history for this account
+                                        Showing transactions for highest risk account: <span className="font-medium text-slate-700">{account.highest_risk_account_id || 'N/A'}</span>
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent>
@@ -437,9 +469,9 @@ export default function FlaggedAccountDetailsPage() {
                                                             </div>
                                                         </div>
                                                         <div className="text-right">
-                                                            <p className="text-lg font-semibold text-slate-900">${txn.amount.toLocaleString()}</p>
-                                                            <span className={`text-xs px-2 py-0.5 rounded border ${riskBadge(txn.risk)}`}>
-                                                                {txn.risk.toUpperCase()} RISK
+                                                            <p className="text-lg font-semibold text-slate-900">${(txn.amount ?? 0).toLocaleString()}</p>
+                                                            <span className={`text-xs px-2 py-0.5 rounded border ${riskBadge(txn.risk || 'low')}`}>
+                                                                {(txn.risk || 'low').toUpperCase()} RISK
                                                             </span>
                                                         </div>
                                                     </div>
@@ -449,7 +481,7 @@ export default function FlaggedAccountDetailsPage() {
                                                 <div className="flex justify-between items-center">
                                                     <span className="text-slate-500">Total Amount</span>
                                                     <span className="text-2xl font-bold text-red-600">
-                                                        ${account.suspicious_transactions.reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
+                                                        ${(account.suspicious_transactions?.reduce((sum, t) => sum + (t.amount ?? 0), 0) ?? 0).toLocaleString()}
                                                     </span>
                                                 </div>
                                             </div>
@@ -538,7 +570,7 @@ export default function FlaggedAccountDetailsPage() {
                                         Recent Activity Log
                                     </CardTitle>
                                     <CardDescription className="text-slate-500">
-                                        Timeline of account activities and alerts
+                                        Activity timeline for highest risk account: <span className="font-medium text-slate-700">{account.highest_risk_account_id || 'N/A'}</span>
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent>
@@ -560,8 +592,8 @@ export default function FlaggedAccountDetailsPage() {
                                                     <div className="pb-4 flex-1">
                                                         <div className="flex items-center justify-between">
                                                             <p className="font-medium text-slate-900">{activity.action}</p>
-                                                            {activity.amount && (
-                                                                <span className="font-semibold text-slate-900">${activity.amount.toLocaleString()}</span>
+                                                            {activity.amount != null && (
+                                                                <span className="font-semibold text-slate-900">${(activity.amount ?? 0).toLocaleString()}</span>
                                                             )}
                                                         </div>
                                                         <p className="text-sm text-slate-500">{activity.time}</p>
@@ -592,6 +624,8 @@ export default function FlaggedAccountDetailsPage() {
                         toolCalls={investigation.toolCalls}
                         traceEvents={investigation.traceEvents}
                         getStepStatus={investigation.getStepStatus}
+                        accountPredictions={account.account_predictions || []}
+                        highestRiskAccountId={account.highest_risk_account_id || ''}
                     />
                 </div>
             </div>

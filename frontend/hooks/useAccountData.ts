@@ -60,6 +60,11 @@ interface RiskFactor {
     score: number
 }
 
+interface AccountPrediction {
+    account_id: string
+    risk_score: number
+}
+
 interface FlaggedAccountInfo {
     account_id: string
     user_id: string
@@ -69,6 +74,8 @@ interface FlaggedAccountInfo {
     flagged_date: string
     status: string
     risk_factors: RiskFactor[]
+    account_predictions?: AccountPrediction[]
+    highest_risk_account_id?: string
 }
 
 interface ActivityLog {
@@ -124,6 +131,9 @@ export interface AccountData {
     activity_log: ActivityLog[]
     connected_users: ConnectedUser[]
     accounts: Account[]
+    account_predictions?: AccountPrediction[]
+    highest_risk_account_id?: string
+    high_risk_accounts: Account[]
 }
 
 interface UseAccountDataReturn {
@@ -322,6 +332,19 @@ export function useAccountData(userId: string): UseAccountDataReturn {
             // Get primary account ID
             const primaryAccountId = getId(primaryAccount)
             
+            // Extract account predictions and highest risk account from flagged account
+            const accountPredictions = flaggedAccount?.account_predictions || []
+            const highestRiskAccountId = flaggedAccount?.highest_risk_account_id || getId(primaryAccount)
+            
+            // Compute high risk accounts (risk_score >= 50)
+            const RISK_THRESHOLD = 50
+            const highRiskAccountIds = new Set(
+                accountPredictions
+                    .filter(p => p.risk_score >= RISK_THRESHOLD)
+                    .map(p => p.account_id)
+            )
+            const highRiskAccounts = accounts.filter((acc: any) => highRiskAccountIds.has(getId(acc)))
+            
             // Build combined data object
             const combinedData: AccountData = {
                 id: userId,
@@ -353,7 +376,10 @@ export function useAccountData(userId: string): UseAccountDataReturn {
                 devices: transformedDevices,
                 activity_log: activityLog,
                 connected_users: connectedUsers,
-                accounts: accounts
+                accounts: accounts,
+                account_predictions: accountPredictions,
+                highest_risk_account_id: highestRiskAccountId,
+                high_risk_accounts: highRiskAccounts
             }
             
             setData(combinedData)

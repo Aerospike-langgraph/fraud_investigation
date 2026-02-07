@@ -468,7 +468,7 @@ class FlaggedAccountService:
         highest_account = user_prediction.get("highest_risk_account", {})
         
         flagged_record = {
-            "account_id": user_id,  # Keep backwards compatible naming
+            "account_id": highest_account.get("account_id", user_id),  # Use highest risk account ID
             "user_id": user_id,
             "account_holder": user.get("name", "Unknown"),
             "email": user.get("email", ""),
@@ -496,7 +496,13 @@ class FlaggedAccountService:
                    f"({len(account_predictions)} accounts evaluated)")
     
     def _update_device_flags(self):
-        """Update device fraud flags based on device-fact features."""
+        """
+        Update device watchlist flags based on device-fact features.
+        
+        NOTE: During ML detection, we only set watchlist=True, never fraud=True.
+        Device fraud=True is only set when a human confirms an account as fraud
+        (via resolve_account endpoint), which then flags devices used in that account's transactions.
+        """
         if not self._use_aerospike():
             return
         
@@ -511,22 +517,98 @@ class FlaggedAccountService:
                 # Apply device flagging rules
                 flagging = ml_model_service.evaluate_device_flagging(device_fact)
                 
-                # Update device-fact with watchlist/fraud status
+                # Update device-fact with watchlist status ONLY (not fraud)
+                # fraud=True is only set when human confirms account as fraud
                 device_fact["watchlist"] = flagging["watchlist"]
-                device_fact["fraud"] = flagging["fraud"]
+                # Preserve existing fraud status if already set by human confirmation
+                # Don't overwrite fraud=True with fraud=False from ML
+                if not device_fact.get("fraud", False):
+                    device_fact["fraud"] = False
                 self._aerospike.update_device_fact(device_id, device_fact)
                 
-                # Update graph vertex fraud_flag if device is flagged
-                if flagging["fraud"] and self.graph_service and self.graph_service.client:
-                    try:
-                        self.graph_service.client.V(device_id) \
-                            .property("fraud_flag", True) \
-                            .iterate()
-                    except:
-                        pass
+                # NOTE: We do NOT update graph fraud_flag here during ML detection
+                # Graph fraud_flag is only set when human confirms fraud via resolve_account
                         
         except Exception as e:
             logger.warning(f"Error updating device flags: {e}")
+    
+    def get_devices_for_account_transactions(self, account_id: str) -> List[str]:
+        """
+        Get all unique device IDs used in transactions for this account.
+        
+        Args:
+            account_id: The account ID to get devices for
+            
+        Returns:
+            List of unique device IDs used in the account's transactions
+        """
+        if not self.graph_service or not self.graph_service.client:
+            return []
+        
+        try:
+            g = self.graph_service.client
+            # Get all TRANSACTS edges for this account and extract device_id
+            device_ids = g.V(account_id).bothE("TRANSACTS").values("device_id").dedup().toList()
+            # Filter out None values
+            return [d for d in device_ids if d]
+        except Exception as e:
+            logger.warning(f"Error getting devices for account {account_id}: {e}")
+            return []
+    
+    def flag_devices_for_confirmed_fraud(self, account_id: str) -> Dict[str, Any]:
+        """
+        Flag all devices used in transactions for a confirmed fraud account.
+        Updates both Graph DB (fraud_flag=True) and KV (device-fact fraud=True).
+        
+        Args:
+            account_id: The account ID that was confirmed as fraud
+            
+        Returns:
+            Dictionary with flagging results
+        """
+        result = {
+            "account_id": account_id,
+            "devices_flagged": [],
+            "errors": []
+        }
+        
+        # Get devices used in this account's transactions
+        device_ids = self.get_devices_for_account_transactions(account_id)
+        
+        for device_id in device_ids:
+            try:
+                # Update Graph DB: Set fraud_flag=True on device vertex
+                if self.graph_service and self.graph_service.client:
+                    self.graph_service.client.V(device_id) \
+                        .property("fraud_flag", True) \
+                        .iterate()
+                
+                # Update KV: Set fraud=True in device-fact
+                if self._use_aerospike():
+                    device_fact = self._aerospike.get_device_fact(device_id)
+                    if device_fact:
+                        device_fact["fraud"] = True
+                        device_fact["fraud_reason"] = f"Connected to confirmed fraud account {account_id}"
+                        device_fact["fraud_date"] = datetime.now().isoformat()
+                        self._aerospike.update_device_fact(device_id, device_fact)
+                    else:
+                        # Create device-fact if it doesn't exist
+                        self._aerospike.put_device_fact(device_id, {
+                            "device_id": device_id,
+                            "fraud": True,
+                            "fraud_reason": f"Connected to confirmed fraud account {account_id}",
+                            "fraud_date": datetime.now().isoformat()
+                        })
+                
+                result["devices_flagged"].append(device_id)
+                logger.info(f"Flagged device {device_id} as fraud (connected to account {account_id})")
+                
+            except Exception as e:
+                error_msg = f"Error flagging device {device_id}: {e}"
+                result["errors"].append(error_msg)
+                logger.warning(error_msg)
+        
+        return result
     
     def _get_all_accounts(self) -> List[Dict[str, Any]]:
         """Get all accounts from the graph database."""
@@ -598,9 +680,8 @@ class FlaggedAccountService:
         """Extract features for a user from their Aerospike data and graph relationships."""
         try:
             # Get the user's pre-existing risk score from their profile
-            base_risk_score = user_data.get("risk_score", 0)
-            if base_risk_score is None:
-                base_risk_score = 0
+            # Use curr_risk (actual computed score) first, fallback to risk_score (initial value)
+            base_risk_score = user_data.get("curr_risk") or user_data.get("risk_score") or 0
             
             # Start with user's stored data
             features = {
@@ -776,10 +857,10 @@ class FlaggedAccountService:
     
     def resolve_flagged_account(self, account_id: str, resolution: str, notes: str = "") -> Optional[Dict[str, Any]]:
         """
-        Resolve a flagged account.
+        Resolve a flagged account (user-level).
         
         Args:
-            account_id: The account ID
+            account_id: The user ID (flagged accounts are stored by user_id)
             resolution: "confirmed_fraud" or "cleared"
             notes: Optional notes about the resolution
         """
@@ -802,6 +883,115 @@ class FlaggedAccountService:
             if self._aerospike.update_flagged_account(account_id, updates):
                 return self._aerospike.get_flagged_account(account_id)
             return None
+    
+    def resolve_account(self, account_id: str, resolution: str, notes: str = "") -> Dict[str, Any]:
+        """
+        Resolve an individual account (account-level, not user-level).
+        
+        When confirmed_fraud:
+        - Updates account's fraud_flag in Graph DB
+        - Updates account-fact in KV with fraud=True
+        - Flags all devices used in this account's transactions
+        
+        When cleared:
+        - Updates account's fraud_flag=False in Graph DB
+        - Updates account-fact in KV with fraud=False
+        
+        Args:
+            account_id: The account ID (e.g., A000401)
+            resolution: "confirmed_fraud" or "cleared"
+            notes: Optional notes about the resolution
+            
+        Returns:
+            Dictionary with resolution results
+        """
+        result = {
+            "account_id": account_id,
+            "resolution": resolution,
+            "success": False,
+            "graph_updated": False,
+            "kv_updated": False,
+            "devices_flagged": [],
+            "errors": []
+        }
+        
+        try:
+            if resolution == "confirmed_fraud":
+                # Update Graph DB: Set fraud_flag=True on account vertex
+                if self.graph_service and self.graph_service.client:
+                    try:
+                        self.graph_service.client.V(account_id) \
+                            .property("fraud_flag", True) \
+                            .property("fraud_reason", notes or "Confirmed fraud by analyst") \
+                            .property("fraud_date", datetime.now().isoformat()) \
+                            .iterate()
+                        result["graph_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"Graph update error: {e}")
+                
+                # Update KV: Set fraud=True in account-fact
+                if self._use_aerospike():
+                    try:
+                        account_fact = self._aerospike.get_account_fact(account_id)
+                        if account_fact:
+                            account_fact["fraud"] = True
+                            account_fact["fraud_reason"] = notes or "Confirmed fraud by analyst"
+                            account_fact["fraud_date"] = datetime.now().isoformat()
+                            self._aerospike.update_account_fact(account_id, account_fact)
+                        else:
+                            self._aerospike.put_account_fact(account_id, {
+                                "account_id": account_id,
+                                "fraud": True,
+                                "fraud_reason": notes or "Confirmed fraud by analyst",
+                                "fraud_date": datetime.now().isoformat()
+                            })
+                        result["kv_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"KV update error: {e}")
+                
+                # Flag devices used in this account's transactions
+                device_result = self.flag_devices_for_confirmed_fraud(account_id)
+                result["devices_flagged"] = device_result.get("devices_flagged", [])
+                if device_result.get("errors"):
+                    result["errors"].extend(device_result["errors"])
+                
+                logger.info(f"Account {account_id} confirmed as fraud. Flagged {len(result['devices_flagged'])} devices.")
+                
+            elif resolution == "cleared":
+                # Update Graph DB: Set fraud_flag=False on account vertex
+                if self.graph_service and self.graph_service.client:
+                    try:
+                        self.graph_service.client.V(account_id) \
+                            .property("fraud_flag", False) \
+                            .property("cleared_date", datetime.now().isoformat()) \
+                            .property("cleared_notes", notes or "Cleared by analyst") \
+                            .iterate()
+                        result["graph_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"Graph update error: {e}")
+                
+                # Update KV: Set fraud=False in account-fact
+                if self._use_aerospike():
+                    try:
+                        account_fact = self._aerospike.get_account_fact(account_id)
+                        if account_fact:
+                            account_fact["fraud"] = False
+                            account_fact["cleared_date"] = datetime.now().isoformat()
+                            account_fact["cleared_notes"] = notes or "Cleared by analyst"
+                            self._aerospike.update_account_fact(account_id, account_fact)
+                            result["kv_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"KV update error: {e}")
+                
+                logger.info(f"Account {account_id} cleared.")
+            
+            result["success"] = result["graph_updated"] or result["kv_updated"]
+            
+        except Exception as e:
+            result["errors"].append(f"Resolution error: {e}")
+            logger.error(f"Error resolving account {account_id}: {e}")
+        
+        return result
     
     def get_flagged_stats(self) -> Dict[str, Any]:
         """Get statistics for flagged accounts."""
