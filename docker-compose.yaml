@@ -89,7 +89,7 @@ services:
       - OLLAMA_MODEL=mistral
       # Gemini settings (used when LLM_PROVIDER=gemini)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-1.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
     volumes:
       - ./data:/data
     healthcheck:
