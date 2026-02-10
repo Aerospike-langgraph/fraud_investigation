@@ -231,7 +231,7 @@ async def _call_ollama(prompt: str) -> str:
 
 
 async def _call_gemini(prompt: str) -> str:
-    """Call Google Gemini API with the prompt."""
+    """Call Google Gemini API using native generateContent endpoint."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
     
@@ -240,13 +240,22 @@ async def _call_gemini(prompt: str) -> str:
     
     logger.info(f"[Report] Calling Gemini API with model {model}")
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+    # Use native Gemini API endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             url,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key
+            },
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
+                "contents": [
+                    {
+                        "parts": [{"text": prompt}]
+                    }
+                ],
                 "generationConfig": {
                     "temperature": 0.4,
                     "maxOutputTokens": 1500

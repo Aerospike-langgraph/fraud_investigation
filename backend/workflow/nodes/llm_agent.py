@@ -467,20 +467,29 @@ def _call_ollama(base_url: str, model: str, prompt: str) -> str:
 
 
 def _call_gemini(api_key: str, model: str, prompt: str) -> str:
-    """Call Google Gemini API synchronously."""
+    """Call Google Gemini API using native generateContent endpoint."""
     import time
     
     logger.info(f"[LLM] Calling Gemini API with model {model}")
     start = time.time()
     
     try:
-        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+        # Use native Gemini API endpoint
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         
         with httpx.Client(timeout=300.0) as client:
             response = client.post(
                 url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key
+                },
                 json={
-                    "contents": [{"parts": [{"text": prompt}]}],
+                    "contents": [
+                        {
+                            "parts": [{"text": prompt}]
+                        }
+                    ],
                     "generationConfig": {
                         "temperature": 0.3,
                         "maxOutputTokens": 1000
