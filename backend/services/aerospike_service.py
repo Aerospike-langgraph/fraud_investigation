@@ -41,6 +41,7 @@ SET_HISTORY = 'detection_history'
 SET_TRANSACTIONS = 'transactions'      # PK = {account_id}:{year_month}
 SET_ACCOUNT_FACT = 'account_fact'      # PK = account_id
 SET_DEVICE_FACT = 'device_fact'        # PK = device_id
+SET_INVESTIGATIONS = 'investigations'  # PK = investigation_id
 
 # Aerospike bin name limit is 15 characters
 # Map long bin names to short versions
@@ -66,6 +67,13 @@ BIN_NAME_MAP = {
     'account_holder': 'acct_holder',
     'account_predictions': 'acct_preds',
     'highest_risk_account_id': 'high_risk_acct',
+    # Investigation bins (15 char limit)
+    'investigation_id': 'inv_id',
+    'initial_evidence': 'init_evidence',
+    'final_assessment': 'final_assess',
+    'agent_iterations': 'agent_iters',
+    'report_markdown': 'report_md',
+    'completed_steps': 'compl_steps',
     # Account-fact bins (15 char limit)
     'txn_out_count_7d': 'txn_out_7d',
     'txn_out_count_24h_peak': 'txn_24h_peak',
@@ -1064,7 +1072,121 @@ class AerospikeService:
             "transactions": self.truncate_set(SET_TRANSACTIONS),
             "evaluations": self.truncate_set(SET_EVALUATIONS),
             "history": self.truncate_set(SET_HISTORY),
+            "investigations": self.truncate_set(SET_INVESTIGATIONS),
         }
+    
+    # ----------------------------------------------------------------------------------------------------------
+    # Investigation Operations
+    # ----------------------------------------------------------------------------------------------------------
+    
+    def put_investigation(self, investigation_id: str, data: Dict[str, Any]) -> bool:
+        """
+        Store a completed investigation result.
+        
+        Args:
+            investigation_id: Unique investigation ID
+            data: Investigation data including:
+                - user_id: The user that was investigated
+                - completed_at: Timestamp of completion
+                - initial_evidence: Evidence collected
+                - final_assessment: AI assessment result
+                - tool_calls: Tools called during investigation
+                - report_markdown: Generated report
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            # Add metadata
+            data["investigation_id"] = investigation_id
+            data["stored_at"] = datetime.now().isoformat()
+            
+            return self.put(SET_INVESTIGATIONS, investigation_id, data)
+        except Exception as e:
+            logger.error(f"Error storing investigation {investigation_id}: {e}")
+            return False
+    
+    def get_investigation(self, investigation_id: str) -> Optional[Dict[str, Any]]:
+        """Get an investigation by ID."""
+        return self.get(SET_INVESTIGATIONS, investigation_id)
+    
+    def get_user_latest_investigation(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent completed investigation for a user.
+        
+        Args:
+            user_id: The user ID to find investigations for
+            
+        Returns:
+            The most recent investigation or None
+        """
+        if not self.is_connected():
+            return None
+        
+        try:
+            # Scan all investigations and filter by user_id
+            all_investigations = self.scan_all(SET_INVESTIGATIONS, limit=1000)
+            
+            # Filter by user_id and sort by completed_at
+            user_investigations = [
+                inv for inv in all_investigations 
+                if inv.get("user_id") == user_id
+            ]
+            
+            if not user_investigations:
+                return None
+            
+            # Sort by completed_at descending (most recent first)
+            user_investigations.sort(
+                key=lambda x: x.get("completed_at", ""),
+                reverse=True
+            )
+            
+            return user_investigations[0]
+            
+        except Exception as e:
+            logger.error(f"Error getting latest investigation for user {user_id}: {e}")
+            return None
+    
+    def get_user_investigation_history(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get investigation history for a user.
+        
+        Args:
+            user_id: The user ID
+            limit: Maximum number of investigations to return
+            
+        Returns:
+            List of investigations sorted by date (newest first)
+        """
+        if not self.is_connected():
+            return []
+        
+        try:
+            all_investigations = self.scan_all(SET_INVESTIGATIONS, limit=1000)
+            
+            user_investigations = [
+                {
+                    "investigation_id": inv.get("investigation_id"),
+                    "completed_at": inv.get("completed_at"),
+                    "risk_score": inv.get("final_assessment", {}).get("risk_score"),
+                    "risk_level": inv.get("final_assessment", {}).get("risk_level"),
+                    "typology": inv.get("final_assessment", {}).get("typology"),
+                }
+                for inv in all_investigations 
+                if inv.get("user_id") == user_id
+            ]
+            
+            user_investigations.sort(
+                key=lambda x: x.get("completed_at", ""),
+                reverse=True
+            )
+            
+            return user_investigations[:limit]
+            
+        except Exception as e:
+            logger.error(f"Error getting investigation history for user {user_id}: {e}")
+            return []
 
 
 # Singleton instance

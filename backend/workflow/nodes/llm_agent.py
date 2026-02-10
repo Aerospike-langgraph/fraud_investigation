@@ -77,10 +77,6 @@ def llm_agent_node(
         data={"user_id": user_id, "max_iterations": MAX_ITERATIONS}
     ))
     
-    # Get Ollama configuration
-    ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    ollama_model = os.environ.get("OLLAMA_MODEL", "mistral")
-    
     iteration = 0
     final_assessment = None
     error_count = 0
@@ -108,9 +104,9 @@ def llm_agent_node(
                 iteration
             )
             
-            # Call LLM
+            # Call LLM (supports both Gemini and Ollama via env config)
             try:
-                llm_response = _call_ollama(ollama_base_url, ollama_model, prompt)
+                llm_response = _call_llm(prompt)
                 
                 # Record message
                 agent_messages.append(AgentMessage(
@@ -468,6 +464,67 @@ def _call_ollama(base_url: str, model: str, prompt: str) -> str:
     except Exception as e:
         logger.error(f"[LLM] Ollama error: {e}")
         raise
+
+
+def _call_gemini(api_key: str, model: str, prompt: str) -> str:
+    """Call Google Gemini API synchronously."""
+    import time
+    
+    logger.info(f"[LLM] Calling Gemini API with model {model}")
+    start = time.time()
+    
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+        
+        with httpx.Client(timeout=300.0) as client:
+            response = client.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 1000
+                    }
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            elapsed = time.time() - start
+            logger.info(f"[LLM] Gemini responded in {elapsed:.1f}s")
+            
+            # Extract response text from Gemini format
+            candidates = result.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if parts:
+                    return parts[0].get("text", "")
+            
+            return ""
+            
+    except Exception as e:
+        logger.error(f"[LLM] Gemini error: {e}")
+        raise
+
+
+def _call_llm(prompt: str) -> str:
+    """Call the configured LLM provider (Gemini or Ollama)."""
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if provider == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+        
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is required for Gemini provider")
+        
+        return _call_gemini(api_key, model, prompt)
+    else:
+        # Default to Ollama
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        model = os.environ.get("OLLAMA_MODEL", "mistral")
+        return _call_ollama(base_url, model, prompt)
 
 
 def _parse_tool_call(response: str) -> Tuple[Optional[str], Dict[str, Any]]:

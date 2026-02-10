@@ -158,8 +158,8 @@ async def report_generation_node(
             tool_call_summary=tool_call_summary
         )
         
-        # Call Ollama
-        response = await _call_ollama(prompt)
+        # Call LLM (supports both Gemini and Ollama via env config)
+        response = await _call_llm(prompt)
         
         # Clean up the response
         report_markdown = _clean_report(response, state)
@@ -228,6 +228,53 @@ async def _call_ollama(prompt: str) -> str:
         response.raise_for_status()
         result = response.json()
         return result.get("response", "")
+
+
+async def _call_gemini(prompt: str) -> str:
+    """Call Google Gemini API with the prompt."""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+    
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable is required for Gemini provider")
+    
+    logger.info(f"[Report] Calling Gemini API with model {model}")
+    
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+    
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            url,
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.4,
+                    "maxOutputTokens": 1500
+                }
+            }
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract response text from Gemini format
+        candidates = result.get("candidates", [])
+        if candidates:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if parts:
+                return parts[0].get("text", "")
+        
+        return ""
+
+
+async def _call_llm(prompt: str) -> str:
+    """Call the configured LLM provider (Gemini or Ollama)."""
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    
+    if provider == "gemini":
+        return await _call_gemini(prompt)
+    else:
+        return await _call_ollama(prompt)
 
 
 def _build_tool_call_summary(tool_calls: list) -> str:

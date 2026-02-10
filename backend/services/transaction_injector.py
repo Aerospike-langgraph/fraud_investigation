@@ -17,10 +17,12 @@ import logging
 import random
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Set, Tuple
+from typing import Dict, Any, List, Set, Tuple, Optional
 from collections import defaultdict
 
 from gremlin_python.process.graph_traversal import __
+
+from services.progress_service import progress_service
 
 logger = logging.getLogger('fraud_detection.transaction_injector')
 
@@ -31,9 +33,14 @@ class TransactionInjector:
     Dual-writes to Graph and KV store.
     """
     
+    # Class-level operation ID for progress tracking
+    OPERATION_ID = "inject_transactions"
+    
     def __init__(self, graph_service, aerospike_service):
         self.graph = graph_service
         self.kv = aerospike_service
+        self._current_progress = 0
+        self._total_items = 0
         
         # Transaction locations
         self.locations = [
@@ -77,6 +84,15 @@ class TransactionInjector:
         """
         start_time = datetime.now()
         
+        # Initialize progress tracking
+        self._current_progress = 0
+        self._total_items = transaction_count
+        progress_service.start_operation(
+            self.OPERATION_ID, 
+            transaction_count, 
+            "Initializing transaction injection..."
+        )
+        
         result = {
             "job_id": f"inject_{start_time.strftime('%Y%m%d_%H%M%S')}",
             "start_time": start_time.isoformat(),
@@ -100,6 +116,7 @@ class TransactionInjector:
         
         try:
             # Get all accounts
+            progress_service.update_progress(self.OPERATION_ID, 0, "Fetching accounts...")
             accounts = self._get_all_accounts()
             if len(accounts) < 10:
                 raise Exception(f"Not enough accounts ({len(accounts)}). Need at least 10.")
@@ -112,6 +129,7 @@ class TransactionInjector:
             normal_txn_count = transaction_count - fraud_txn_count
             
             # Generate fraud patterns first (they're more structured)
+            progress_service.update_progress(self.OPERATION_ID, 0, "Generating fraud patterns...")
             fraud_result = self._generate_fraud_patterns(accounts, fraud_txn_count, spread_days)
             result["fraud_transactions"] = fraud_result["total"]
             result["fraud_patterns"] = fraud_result["patterns"]
@@ -119,6 +137,11 @@ class TransactionInjector:
             result["kv_writes"] += fraud_result["kv_writes"]
             
             # Generate normal transactions
+            progress_service.update_progress(
+                self.OPERATION_ID, 
+                self._current_progress, 
+                f"Generating normal transactions... ({fraud_result['total']} fraud done)"
+            )
             normal_result = self._generate_normal_transactions(accounts, normal_txn_count, spread_days)
             result["normal_transactions"] = normal_result["count"]
             result["graph_writes"] += normal_result["graph_writes"]
@@ -126,10 +149,24 @@ class TransactionInjector:
             
             result["status"] = "completed"
             
+            # Complete progress tracking
+            total = result["normal_transactions"] + result["fraud_transactions"]
+            progress_service.complete_operation(
+                self.OPERATION_ID,
+                f"Completed! {total} transactions injected.",
+                extra={
+                    "fraud_transactions": result["fraud_transactions"],
+                    "normal_transactions": result["normal_transactions"],
+                    "graph_writes": result["graph_writes"],
+                    "kv_writes": result["kv_writes"],
+                }
+            )
+            
         except Exception as e:
             logger.error(f"Transaction injection failed: {e}")
             result["status"] = "failed"
             result["errors"].append(str(e))
+            progress_service.fail_operation(self.OPERATION_ID, str(e), "Injection failed")
         
         result["end_time"] = datetime.now().isoformat()
         result["duration_seconds"] = (datetime.now() - start_time).total_seconds()
@@ -139,6 +176,15 @@ class TransactionInjector:
                    f"({result['fraud_transactions']} fraud, {result['normal_transactions']} normal)")
         
         return result
+    
+    def _update_progress(self, increment: int = 1, message: Optional[str] = None):
+        """Update progress counter and report to progress service."""
+        self._current_progress += increment
+        progress_service.update_progress(
+            self.OPERATION_ID,
+            self._current_progress,
+            message
+        )
     
     def _get_all_accounts(self) -> List[str]:
         """Get all account IDs from the graph."""
@@ -274,7 +320,7 @@ class TransactionInjector:
         """Generate normal (non-fraudulent) transactions."""
         result = {"count": 0, "graph_writes": 0, "kv_writes": 0}
         
-        for _ in range(count):
+        for i in range(count):
             # Random sender and receiver
             sender, receiver = random.sample(accounts, 2)
             
@@ -298,8 +344,17 @@ class TransactionInjector:
             if graph_ok or kv_ok:
                 result["count"] += 1
             
-            if result["count"] % 1000 == 0:
+            # Update progress every 100 transactions
+            if (i + 1) % 100 == 0:
+                self._update_progress(100, f"Normal transactions: {result['count']}/{count}")
+            
+            if result["count"] % 1000 == 0 and result["count"] > 0:
                 logger.info(f"Generated {result['count']} normal transactions...")
+        
+        # Update remaining progress
+        remaining = count % 100
+        if remaining > 0:
+            self._update_progress(remaining)
         
         return result
     
@@ -369,6 +424,7 @@ class TransactionInjector:
         ring_size = min(self.fraud_config['fraud_ring_size'], len(accounts) // ring_count)
         txns_per_ring = target_count // ring_count
         
+        txn_counter = 0
         for ring_idx in range(ring_count):
             # Select accounts for this ring
             ring_accounts = random.sample(accounts, ring_size)
@@ -401,6 +457,15 @@ class TransactionInjector:
                     result["kv_writes"] += 1
                 if graph_ok or kv_ok:
                     result["count"] += 1
+                
+                txn_counter += 1
+                if txn_counter % 50 == 0:
+                    self._update_progress(50, f"Fraud rings: {result['count']}/{target_count}")
+        
+        # Update remaining progress
+        remaining = txn_counter % 50
+        if remaining > 0:
+            self._update_progress(remaining)
         
         logger.info(f"Generated {result['count']} fraud ring transactions across {ring_count} rings")
         return result
@@ -420,6 +485,7 @@ class TransactionInjector:
         # Select accounts for velocity anomalies
         anomaly_accounts = random.sample(accounts, min(anomaly_count, len(accounts) // 2))
         
+        txn_counter = 0
         for anomaly_account in anomaly_accounts:
             # Pick a specific day for the burst
             burst_day = random.randint(1, max(1, spread_days - 1))
@@ -445,6 +511,15 @@ class TransactionInjector:
                     result["kv_writes"] += 1
                 if graph_ok or kv_ok:
                     result["count"] += 1
+                
+                txn_counter += 1
+                if txn_counter % 50 == 0:
+                    self._update_progress(50, f"Velocity anomalies: {result['count']}/{target_count}")
+        
+        # Update remaining progress
+        remaining = txn_counter % 50
+        if remaining > 0:
+            self._update_progress(remaining)
         
         logger.info(f"Generated {result['count']} velocity anomaly transactions")
         return result
@@ -458,7 +533,7 @@ class TransactionInjector:
         """Generate amount anomaly transactions - unusually high values."""
         result = {"count": 0, "graph_writes": 0, "kv_writes": 0}
         
-        for _ in range(target_count):
+        for i in range(target_count):
             sender, receiver = random.sample(accounts, 2)
             
             # High-value amounts (outliers)
@@ -480,6 +555,14 @@ class TransactionInjector:
                 result["kv_writes"] += 1
             if graph_ok or kv_ok:
                 result["count"] += 1
+            
+            if (i + 1) % 20 == 0:
+                self._update_progress(20, f"Amount anomalies: {result['count']}/{target_count}")
+        
+        # Update remaining progress
+        remaining = target_count % 20
+        if remaining > 0:
+            self._update_progress(remaining)
         
         logger.info(f"Generated {result['count']} amount anomaly transactions")
         return result
@@ -497,6 +580,7 @@ class TransactionInjector:
         new_account_candidates = accounts[:min(20, len(accounts))]
         txns_per_account = target_count // max(1, len(new_account_candidates))
         
+        txn_counter = 0
         for new_account in new_account_candidates[:self.fraud_config['new_account_fraud_count']]:
             # All activity within first few days (immediate)
             for _ in range(txns_per_account):
@@ -519,6 +603,15 @@ class TransactionInjector:
                     result["kv_writes"] += 1
                 if graph_ok or kv_ok:
                     result["count"] += 1
+                
+                txn_counter += 1
+                if txn_counter % 20 == 0:
+                    self._update_progress(20, f"New account fraud: {result['count']}/{target_count}")
+        
+        # Update remaining progress
+        remaining = txn_counter % 20
+        if remaining > 0:
+            self._update_progress(remaining)
         
         logger.info(f"Generated {result['count']} new account fraud transactions")
         return result

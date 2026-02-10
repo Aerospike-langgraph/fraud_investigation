@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Query, Path, Body, File, UploadFile,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import urllib.parse
 import tempfile
@@ -25,6 +25,7 @@ from services.investigation_service import InvestigationService
 from services.gremlin_loader import GremlinDataLoader
 from services.feature_service import FeatureService
 from services.transaction_injector import TransactionInjector
+from services.progress_service import progress_service
 
 from logging_config import setup_logging, get_logger
 
@@ -155,6 +156,33 @@ def health_check():
         "status": "healthy",
         "graph_connection": graph_status,
         "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/operation-progress/{operation_id}")
+def get_operation_progress(operation_id: str = Path(..., description="Operation ID to get progress for")):
+    """
+    Get progress for a long-running operation.
+    
+    Used by the frontend to poll progress during:
+    - Transaction injection
+    - Feature computation
+    - ML detection job
+    
+    Returns progress percentage, current/total items, and estimated time remaining.
+    """
+    progress = progress_service.get_progress(operation_id)
+    
+    if not progress:
+        return {
+            "found": False,
+            "operation_id": operation_id,
+            "message": "Operation not found or already completed"
+        }
+    
+    return {
+        "found": True,
+        **progress.to_dict()
     }
 
 
@@ -1175,6 +1203,54 @@ def resolve_individual_account(
         raise HTTPException(status_code=500, detail=f"Failed to resolve account: {str(e)}")
 
 
+@app.post("/accounts/resolutions")
+def get_account_resolutions(
+    account_ids: List[str] = Body(..., description="List of account IDs to check")
+):
+    """
+    Get fraud/cleared resolution status for multiple accounts.
+    
+    Returns the fraud status from account-fact KV store for each account.
+    Used by the frontend to pre-populate decision state when loading the review page.
+    """
+    try:
+        results = {}
+        for account_id in account_ids:
+            fact = aerospike_service.get_account_fact(account_id)
+            if fact:
+                # Determine resolution status
+                fraud_status = fact.get("fraud")
+                if fraud_status is True:
+                    resolution = "fraud"
+                elif fraud_status is False and fact.get("cleared_date"):
+                    resolution = "safe"
+                else:
+                    resolution = None
+                
+                results[account_id] = {
+                    "resolution": resolution,
+                    "fraud": fraud_status,
+                    "fraud_date": fact.get("fraud_date"),
+                    "fraud_reason": fact.get("fraud_reason"),
+                    "cleared_date": fact.get("cleared_date"),
+                    "cleared_notes": fact.get("cleared_notes")
+                }
+            else:
+                results[account_id] = {
+                    "resolution": None,
+                    "fraud": None,
+                    "fraud_date": None,
+                    "fraud_reason": None,
+                    "cleared_date": None,
+                    "cleared_notes": None
+                }
+        
+        return {"resolutions": results}
+    except Exception as e:
+        logger.error(f"❌ Failed to get account resolutions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get account resolutions: {str(e)}")
+
+
 @app.post("/flagged-accounts/detect")
 def trigger_detection_job(
     skip_cooldown: bool = Query(False, description="Skip cooldown period and evaluate all users")
@@ -1486,6 +1562,48 @@ def get_user_investigation_history(
     except Exception as e:
         logger.error(f"❌ Failed to get user investigation history: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+
+@app.get("/investigation/user/{user_id}/latest")
+def get_user_latest_investigation(
+    user_id: str = Path(..., description="User ID")
+):
+    """
+    Get the most recent completed investigation for a user.
+    
+    Returns the full investigation data including:
+    - initial_evidence
+    - final_assessment
+    - tool_calls
+    - report_markdown
+    - completed_steps
+    
+    This endpoint is used by the frontend to restore investigation state
+    when the user navigates back to the investigation page.
+    """
+    try:
+        if not investigation_service:
+            raise HTTPException(status_code=503, detail="Investigation service not initialized")
+        
+        latest = investigation_service.get_user_latest_investigation(user_id)
+        
+        if not latest:
+            return {
+                "user_id": user_id,
+                "found": False,
+                "investigation": None
+            }
+        
+        return {
+            "user_id": user_id,
+            "found": True,
+            "investigation": latest
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get latest investigation for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get latest investigation: {str(e)}")
 
 
 # ============================================================================

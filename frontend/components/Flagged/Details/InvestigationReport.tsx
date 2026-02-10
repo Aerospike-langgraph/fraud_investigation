@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import ReactMarkdown from "react-markdown";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -521,10 +522,54 @@ export function InvestigationReport({
             </div>
           </CardHeader>
           <CardContent>
-            <div className="prose prose-sm max-w-none">
-              <pre className="whitespace-pre-wrap text-sm text-slate-700 bg-slate-50 p-4 rounded-lg overflow-auto max-h-96 border border-slate-200">
+            <div className="bg-slate-50 p-5 rounded-lg overflow-auto max-h-[500px] border border-slate-200">
+              <ReactMarkdown
+                components={{
+                  h1: ({ children }) => (
+                    <h1 className="text-xl font-bold text-slate-900 mb-3 mt-4 first:mt-0 pb-2 border-b border-slate-200">
+                      {children}
+                    </h1>
+                  ),
+                  h2: ({ children }) => (
+                    <h2 className="text-lg font-bold text-slate-900 mb-2 mt-4 first:mt-0">
+                      {children}
+                    </h2>
+                  ),
+                  h3: ({ children }) => (
+                    <h3 className="text-base font-semibold text-slate-800 mb-2 mt-4 first:mt-0 flex items-center gap-2">
+                      <span className="w-1 h-4 bg-blue-500 rounded-full"></span>
+                      {children}
+                    </h3>
+                  ),
+                  p: ({ children }) => (
+                    <p className="text-sm text-slate-700 leading-relaxed mb-3">
+                      {children}
+                    </p>
+                  ),
+                  ul: ({ children }) => (
+                    <ul className="space-y-1.5 mb-3 ml-1">
+                      {children}
+                    </ul>
+                  ),
+                  li: ({ children }) => (
+                    <li className="text-sm text-slate-700 flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 bg-slate-400 rounded-full mt-1.5 flex-shrink-0"></span>
+                      <span>{children}</span>
+                    </li>
+                  ),
+                  strong: ({ children }) => (
+                    <strong className="font-semibold text-slate-900">{children}</strong>
+                  ),
+                  code: ({ children }) => (
+                    <code className="bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono">
+                      {children}
+                    </code>
+                  ),
+                  hr: () => <hr className="my-4 border-slate-200" />,
+                }}
+              >
                 {report}
-              </pre>
+              </ReactMarkdown>
             </div>
           </CardContent>
         </Card>

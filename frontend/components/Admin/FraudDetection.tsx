@@ -149,6 +149,20 @@ const FraudDetection = () => {
     const [aerospikeConnected, setAerospikeConnected] = useState<boolean | null>(null)
     const [computingFeatures, setComputingFeatures] = useState(false)
     const [featureResult, setFeatureResult] = useState<any>(null)
+    const [featureProgress, setFeatureProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
+    const [detectionProgress, setDetectionProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
 
     const toggleScenario = (scenarioId: string) => {
         setScenarios(prev => prev.map(scenario => 
@@ -240,11 +254,38 @@ const FraudDetection = () => {
         }
     }
 
+    // Poll for operation progress
+    const pollProgress = async (operationId: string, setProgress: (p: any) => void): Promise<void> => {
+        try {
+            const response = await fetch(`/api/operation-progress/${operationId}`)
+            if (response.ok) {
+                const data = await response.json()
+                if (data.found) {
+                    setProgress({
+                        current: data.current,
+                        total: data.total,
+                        percentage: data.percentage,
+                        message: data.message,
+                        estimated_remaining_seconds: data.estimated_remaining_seconds
+                    })
+                }
+            }
+        } catch (error) {
+            console.error('Failed to poll progress:', error)
+        }
+    }
+
     // Compute features from KV transactions
     const handleComputeFeatures = async () => {
         setComputingFeatures(true)
         setFeatureResult(null)
+        setFeatureProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
         toast.info(`Computing features with ${config.cooldown_days}-day window...`)
+        
+        // Start polling for progress
+        const progressInterval = setInterval(() => {
+            pollProgress('compute_features', setFeatureProgress)
+        }, 500)
         
         try {
             const response = await fetch(`/api/compute-features?window_days=${config.cooldown_days}`, {
@@ -254,6 +295,7 @@ const FraudDetection = () => {
             if (response.ok) {
                 const data = await response.json()
                 setFeatureResult(data)
+                setFeatureProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
                 toast.success(`Features computed! ${data.accounts_processed || 0} accounts, ${data.devices_processed || 0} devices.`)
             } else {
                 const error = await response.json()
@@ -262,14 +304,22 @@ const FraudDetection = () => {
         } catch (error) {
             toast.error('Error computing features')
         } finally {
+            clearInterval(progressInterval)
             setComputingFeatures(false)
+            setTimeout(() => setFeatureProgress(null), 2000)
         }
     }
 
     // Run detection manually
     const handleRunDetection = async () => {
         setRunningDetection(true)
+        setDetectionProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
         toast.info(skipCooldown ? 'Starting detection job (skipping cooldown)...' : 'Starting detection job...')
+        
+        // Start polling for progress
+        const progressInterval = setInterval(() => {
+            pollProgress('ml_detection', setDetectionProgress)
+        }, 500)
         
         try {
             const url = skipCooldown 
@@ -281,6 +331,7 @@ const FraudDetection = () => {
             
             if (response.ok) {
                 const data = await response.json()
+                setDetectionProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
                 toast.success(`Detection completed! ${data.result?.newly_flagged || 0} users flagged.`)
                 fetchHistory()
                 fetchConfig()
@@ -291,7 +342,9 @@ const FraudDetection = () => {
         } catch (error) {
             toast.error('Error running detection job')
         } finally {
+            clearInterval(progressInterval)
             setRunningDetection(false)
+            setTimeout(() => setDetectionProgress(null), 2000)
         }
     }
 
@@ -611,6 +664,36 @@ const FraudDetection = () => {
                             </div>
                         )}
 
+                        {/* Progress Bar */}
+                        {computingFeatures && featureProgress && (
+                            <div className="p-4 bg-purple-50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 rounded-lg space-y-2">
+                                <div className="flex justify-between text-sm">
+                                    <span className="font-medium text-purple-800 dark:text-purple-200">
+                                        {featureProgress.message}
+                                    </span>
+                                    <span className="text-purple-600 dark:text-purple-400">
+                                        {featureProgress.percentage}%
+                                    </span>
+                                </div>
+                                <div className="h-3 bg-purple-100 dark:bg-purple-900/50 rounded-full overflow-hidden">
+                                    <div 
+                                        className="h-full bg-purple-500 transition-all duration-300 rounded-full"
+                                        style={{ width: `${featureProgress.percentage}%` }}
+                                    />
+                                </div>
+                                <div className="flex justify-between text-xs text-purple-600 dark:text-purple-400">
+                                    <span>
+                                        {featureProgress.current.toLocaleString()} / {featureProgress.total.toLocaleString()} items
+                                    </span>
+                                    {featureProgress.estimated_remaining_seconds !== null && (
+                                        <span>
+                                            Est. ~{Math.round(featureProgress.estimated_remaining_seconds)}s remaining
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
                         <Button 
                             onClick={handleComputeFeatures} 
                             disabled={computingFeatures}
@@ -619,7 +702,7 @@ const FraudDetection = () => {
                             {computingFeatures ? (
                                 <>
                                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                    Computing Features...
+                                    {featureProgress ? `${featureProgress.percentage}%` : 'Starting...'}
                                 </>
                             ) : (
                                 <>
@@ -697,6 +780,36 @@ const FraudDetection = () => {
                             />
                         </div>
 
+                        {/* Progress Bar */}
+                        {runningDetection && detectionProgress && (
+                            <div className="p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg space-y-2">
+                                <div className="flex justify-between text-sm">
+                                    <span className="font-medium text-blue-800 dark:text-blue-200">
+                                        {detectionProgress.message}
+                                    </span>
+                                    <span className="text-blue-600 dark:text-blue-400">
+                                        {detectionProgress.percentage}%
+                                    </span>
+                                </div>
+                                <div className="h-3 bg-blue-100 dark:bg-blue-900/50 rounded-full overflow-hidden">
+                                    <div 
+                                        className="h-full bg-blue-500 transition-all duration-300 rounded-full"
+                                        style={{ width: `${detectionProgress.percentage}%` }}
+                                    />
+                                </div>
+                                <div className="flex justify-between text-xs text-blue-600 dark:text-blue-400">
+                                    <span>
+                                        {detectionProgress.current.toLocaleString()} / {detectionProgress.total.toLocaleString()} users
+                                    </span>
+                                    {detectionProgress.estimated_remaining_seconds !== null && (
+                                        <span>
+                                            Est. ~{Math.round(detectionProgress.estimated_remaining_seconds)}s remaining
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
                         {/* Run Button */}
                         <Button 
                             onClick={handleRunDetection} 
@@ -707,7 +820,7 @@ const FraudDetection = () => {
                             {runningDetection || schedulerStatus?.detection_job_running ? (
                                 <>
                                     <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                                    Running Detection...
+                                    {detectionProgress ? `${detectionProgress.percentage}%` : 'Starting...'}
                                 </>
                             ) : (
                                 <>

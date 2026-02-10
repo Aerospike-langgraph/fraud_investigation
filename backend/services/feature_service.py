@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Set
 from collections import defaultdict
 
+from services.progress_service import progress_service
+
 logger = logging.getLogger('fraud_detection.features')
 
 
@@ -29,6 +31,9 @@ class FeatureService:
     Computes account and device features from KV transaction data.
     Uses batch operations for efficiency.
     """
+    
+    # Class-level operation ID for progress tracking
+    OPERATION_ID = "compute_features"
     
     def __init__(self, aerospike_service, graph_service=None):
         self.kv = aerospike_service
@@ -492,6 +497,9 @@ class FeatureService:
         }
         
         try:
+            # Start progress tracking with initial estimate
+            progress_service.start_operation(self.OPERATION_ID, 100, "Fetching entities...")
+            
             # Get all users and their accounts
             users = self.kv.get_all_users(limit=100000)
             
@@ -515,11 +523,20 @@ class FeatureService:
                 except:
                     pass
             
+            # Now we know total items - update progress with accurate count
+            total_items = len(all_account_ids) + len(all_device_ids)
+            progress_service.start_operation(
+                self.OPERATION_ID, 
+                total_items, 
+                f"Computing features for {len(all_account_ids)} accounts and {len(all_device_ids)} devices"
+            )
+            
             logger.info(f"Computing features for {len(all_account_ids)} accounts and {len(all_device_ids)} devices")
             
             # Compute and store account features in batches
             account_list = list(all_account_ids)
             batch_size = 100
+            current_progress = 0
             
             for i in range(0, len(account_list), batch_size):
                 batch = account_list[i:i+batch_size]
@@ -531,8 +548,23 @@ class FeatureService:
                         result["accounts_processed"] += 1
                     except Exception as e:
                         result["errors"].append(f"Account {account_id}: {str(e)}")
+                
+                # Update progress after each batch
+                current_progress += len(batch)
+                progress_service.update_progress(
+                    self.OPERATION_ID, 
+                    current_progress,
+                    f"Accounts: {result['accounts_processed']}/{len(all_account_ids)}"
+                )
             
             # Compute and store device features
+            progress_service.update_progress(
+                self.OPERATION_ID,
+                current_progress,
+                f"Computing device features ({len(all_device_ids)} devices)..."
+            )
+            
+            device_progress = 0
             for device_id in all_device_ids:
                 try:
                     features = self.compute_device_features(device_id, window_days)
@@ -540,13 +572,32 @@ class FeatureService:
                     result["devices_processed"] += 1
                 except Exception as e:
                     result["errors"].append(f"Device {device_id}: {str(e)}")
+                
+                device_progress += 1
+                if device_progress % 100 == 0:
+                    progress_service.update_progress(
+                        self.OPERATION_ID,
+                        current_progress + device_progress,
+                        f"Devices: {result['devices_processed']}/{len(all_device_ids)}"
+                    )
             
             result["status"] = "completed"
+            
+            # Complete progress tracking
+            progress_service.complete_operation(
+                self.OPERATION_ID,
+                f"Completed! {result['accounts_processed']} accounts, {result['devices_processed']} devices",
+                extra={
+                    "accounts_processed": result["accounts_processed"],
+                    "devices_processed": result["devices_processed"],
+                }
+            )
             
         except Exception as e:
             logger.error(f"Feature computation job failed: {e}")
             result["status"] = "failed"
             result["error"] = str(e)
+            progress_service.fail_operation(self.OPERATION_ID, str(e), "Feature computation failed")
         
         result["end_time"] = datetime.now().isoformat()
         result["duration_seconds"] = (datetime.now() - start_time).total_seconds()

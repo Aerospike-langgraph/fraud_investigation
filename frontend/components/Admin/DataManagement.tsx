@@ -75,6 +75,13 @@ const DataManagement = () => {
     const [graphStats, setGraphStats] = useState<GraphStats | null>(null)
     const [aerospikeStats, setAerospikeStats] = useState<AerospikeStats | null>(null)
     const [loadingStats, setLoadingStats] = useState(false)
+    const [bulkLoadProgress, setBulkLoadProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
     
     // Load options
     const [loadGraph, setLoadGraph] = useState(true)
@@ -91,6 +98,13 @@ const DataManagement = () => {
     const [spreadDays, setSpreadDays] = useState(30)
     const [fraudPercentage, setFraudPercentage] = useState(15)
     const [injectionResult, setInjectionResult] = useState<any>(null)
+    const [injectionProgress, setInjectionProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
     
     // Delete all data state
     const [deleteLoading, setDeleteLoading] = useState(false)
@@ -151,6 +165,12 @@ const DataManagement = () => {
 
         setIsLoading(true)
         setBulkLoadStatus({ loading: true, message: 'Starting bulk load...' })
+        setBulkLoadProgress({ current: 0, total: 6, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        
+        // Start polling for progress
+        const progressInterval = setInterval(() => {
+            pollProgress('bulk_load', setBulkLoadProgress)
+        }, 500)
         
         try {
             let response: Response
@@ -182,6 +202,7 @@ const DataManagement = () => {
             const data = await response.json()
             
             if (data.success) {
+                setBulkLoadProgress({ current: 6, total: 6, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
                 setBulkLoadStatus({
                     loading: false,
                     success: true,
@@ -217,7 +238,9 @@ const DataManagement = () => {
             })
             toast.error('Failed to connect to backend')
         } finally {
+            clearInterval(progressInterval)
             setIsLoading(false)
+            setTimeout(() => setBulkLoadProgress(null), 2000)
         }
     }
 
@@ -327,10 +350,38 @@ const DataManagement = () => {
         }
     }
 
+    // Poll for operation progress
+    const pollProgress = async (operationId: string, setProgress: (p: any) => void): Promise<void> => {
+        try {
+            const response = await fetch(`/api/operation-progress/${operationId}`)
+            if (response.ok) {
+                const data = await response.json()
+                if (data.found) {
+                    setProgress({
+                        current: data.current,
+                        total: data.total,
+                        percentage: data.percentage,
+                        message: data.message,
+                        estimated_remaining_seconds: data.estimated_remaining_seconds
+                    })
+                }
+            }
+        } catch (error) {
+            console.error('Failed to poll progress:', error)
+        }
+    }
+
     // Inject historical transactions with fraud patterns
     const handleInjectTransactions = async () => {
         setInjectionLoading(true)
         setInjectionResult(null)
+        setInjectionProgress({ current: 0, total: txnCount, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        
+        // Start polling for progress
+        const progressInterval = setInterval(() => {
+            pollProgress('inject_transactions', setInjectionProgress)
+        }, 500)
+        
         try {
             const params = new URLSearchParams({
                 transaction_count: String(txnCount),
@@ -346,6 +397,7 @@ const DataManagement = () => {
             
             if (data.status === 'completed') {
                 setInjectionResult(data)
+                setInjectionProgress({ current: txnCount, total: txnCount, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
                 toast.success(`Injected ${data.normal_transactions + data.fraud_transactions} transactions!`)
                 
                 // Show fraud pattern breakdown
@@ -364,7 +416,10 @@ const DataManagement = () => {
             console.error('Failed to inject transactions:', error)
             toast.error('Failed to inject transactions')
         } finally {
+            clearInterval(progressInterval)
             setInjectionLoading(false)
+            // Clear progress after a short delay
+            setTimeout(() => setInjectionProgress(null), 2000)
         }
     }
 
@@ -657,6 +712,36 @@ const DataManagement = () => {
                         </p>
                     </div>
 
+                    {/* Progress Bar */}
+                    {isLoading && bulkLoadProgress && (
+                        <div className="p-4 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-lg space-y-2">
+                            <div className="flex justify-between text-sm">
+                                <span className="font-medium text-green-800 dark:text-green-200">
+                                    {bulkLoadProgress.message}
+                                </span>
+                                <span className="text-green-600 dark:text-green-400">
+                                    {bulkLoadProgress.percentage}%
+                                </span>
+                            </div>
+                            <div className="h-3 bg-green-100 dark:bg-green-900/50 rounded-full overflow-hidden">
+                                <div 
+                                    className="h-full bg-green-500 transition-all duration-300 rounded-full"
+                                    style={{ width: `${bulkLoadProgress.percentage}%` }}
+                                />
+                            </div>
+                            <div className="flex justify-between text-xs text-green-600 dark:text-green-400">
+                                <span>
+                                    Step {bulkLoadProgress.current} / {bulkLoadProgress.total}
+                                </span>
+                                {bulkLoadProgress.estimated_remaining_seconds !== null && (
+                                    <span>
+                                        Est. ~{Math.round(bulkLoadProgress.estimated_remaining_seconds)}s remaining
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Actions */}
                     <div className="flex gap-3">
                         <Button 
@@ -667,7 +752,7 @@ const DataManagement = () => {
                             {isLoading ? (
                                 <>
                                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                    Loading...
+                                    {bulkLoadProgress ? `${bulkLoadProgress.percentage}%` : 'Starting...'}
                                 </>
                             ) : (
                                 <>
@@ -840,6 +925,36 @@ const DataManagement = () => {
                         </div>
                     )}
 
+                    {/* Progress Bar */}
+                    {injectionLoading && injectionProgress && (
+                        <div className="p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg space-y-2">
+                            <div className="flex justify-between text-sm">
+                                <span className="font-medium text-blue-800 dark:text-blue-200">
+                                    {injectionProgress.message}
+                                </span>
+                                <span className="text-blue-600 dark:text-blue-400">
+                                    {injectionProgress.percentage}%
+                                </span>
+                            </div>
+                            <div className="h-3 bg-blue-100 dark:bg-blue-900/50 rounded-full overflow-hidden">
+                                <div 
+                                    className="h-full bg-blue-500 transition-all duration-300 rounded-full"
+                                    style={{ width: `${injectionProgress.percentage}%` }}
+                                />
+                            </div>
+                            <div className="flex justify-between text-xs text-blue-600 dark:text-blue-400">
+                                <span>
+                                    {injectionProgress.current.toLocaleString()} / {injectionProgress.total.toLocaleString()} transactions
+                                </span>
+                                {injectionProgress.estimated_remaining_seconds !== null && (
+                                    <span>
+                                        Est. ~{Math.round(injectionProgress.estimated_remaining_seconds)}s remaining
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Workflow Guide */}
                     <div className="p-3 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
                         <p className="text-sm font-medium text-blue-800 dark:text-blue-200 mb-2">Testing Workflow:</p>
@@ -859,7 +974,7 @@ const DataManagement = () => {
                         {injectionLoading ? (
                             <>
                                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                Injecting Transactions...
+                                {injectionProgress ? `${injectionProgress.percentage}%` : 'Starting...'}
                             </>
                         ) : (
                             <>

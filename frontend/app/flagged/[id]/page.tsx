@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -106,12 +106,27 @@ export default function FlaggedAccountDetailsPage() {
     const accountId = params.id as string
     const [currentStep, setCurrentStep] = useState(0)
     const [activeTab, setActiveTab] = useState('overview')
+    const [loadedExisting, setLoadedExisting] = useState(false)
     
     // Fetch real account data
     const { data: account, loading, error, refetch } = useAccountData(accountId)
     
     // Investigation hook
     const investigation = useInvestigation()
+
+    // Load existing investigation on mount
+    useEffect(() => {
+        const loadExisting = async () => {
+            if (account?.user_id && investigation.status === 'idle' && !loadedExisting) {
+                setLoadedExisting(true)
+                const found = await investigation.loadExistingInvestigation(account.user_id)
+                if (found) {
+                    console.log('[Page] Loaded existing investigation')
+                }
+            }
+        }
+        loadExisting()
+    }, [account?.user_id, investigation.status, loadedExisting])
 
     const handleStartInvestigation = () => {
         if (account) {
@@ -626,6 +641,7 @@ export default function FlaggedAccountDetailsPage() {
                         getStepStatus={investigation.getStepStatus}
                         accountPredictions={account.account_predictions || []}
                         highestRiskAccountId={account.highest_risk_account_id || ''}
+                        existingResolutions={account.account_resolutions || {}}
                     />
                 </div>
             </div>

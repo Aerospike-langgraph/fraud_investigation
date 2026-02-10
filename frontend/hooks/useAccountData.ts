@@ -65,6 +65,15 @@ interface AccountPrediction {
     risk_score: number
 }
 
+interface AccountResolution {
+    resolution: 'fraud' | 'safe' | null
+    fraud: boolean | null
+    fraud_date: string | null
+    fraud_reason: string | null
+    cleared_date: string | null
+    cleared_notes: string | null
+}
+
 interface FlaggedAccountInfo {
     account_id: string
     user_id: string
@@ -134,6 +143,7 @@ export interface AccountData {
     account_predictions?: AccountPrediction[]
     highest_risk_account_id?: string
     high_risk_accounts: Account[]
+    account_resolutions: Record<string, 'fraud' | 'safe' | null>
 }
 
 interface UseAccountDataReturn {
@@ -345,6 +355,30 @@ export function useAccountData(userId: string): UseAccountDataReturn {
             )
             const highRiskAccounts = accounts.filter((acc: any) => highRiskAccountIds.has(getId(acc)))
             
+            // Fetch account resolutions for high-risk accounts
+            let accountResolutions: Record<string, 'fraud' | 'safe' | null> = {}
+            if (accountPredictions.length > 0) {
+                try {
+                    const accountIds = accountPredictions.map(p => p.account_id)
+                    const resolutionsResponse = await fetch('/api/accounts/resolutions', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(accountIds)
+                    })
+                    if (resolutionsResponse.ok) {
+                        const resolutionsData = await resolutionsResponse.json()
+                        const resolutions = resolutionsData.resolutions || {}
+                        // Convert to simple resolution map
+                        for (const [accountId, data] of Object.entries(resolutions)) {
+                            const resData = data as AccountResolution
+                            accountResolutions[accountId] = resData.resolution
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Failed to fetch account resolutions:', err)
+                }
+            }
+            
             // Build combined data object
             const combinedData: AccountData = {
                 id: userId,
@@ -379,7 +413,8 @@ export function useAccountData(userId: string): UseAccountDataReturn {
                 accounts: accounts,
                 account_predictions: accountPredictions,
                 highest_risk_account_id: highestRiskAccountId,
-                high_risk_accounts: highRiskAccounts
+                high_risk_accounts: highRiskAccounts,
+                account_resolutions: accountResolutions
             }
             
             setData(combinedData)

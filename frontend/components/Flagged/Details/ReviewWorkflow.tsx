@@ -55,6 +55,8 @@ interface Props {
     // Account data for per-account decisions
     accountPredictions?: AccountPrediction[]
     highestRiskAccountId?: string
+    // Existing resolutions from KV store (pre-populate decisions)
+    existingResolutions?: Record<string, 'fraud' | 'safe' | null>
 }
 
 const workflowSteps = [
@@ -105,13 +107,43 @@ const ReviewWorkflow = ({
     traceEvents = [],
     getStepStatus,
     accountPredictions = [],
-    highestRiskAccountId = ''
+    highestRiskAccountId = '',
+    existingResolutions = {}
 }: Props) => {
     const [notes, setNotes] = useState('')
     // Per-account decisions: { account_id: 'fraud' | 'safe' | null }
     const [accountDecisions, setAccountDecisions] = useState<Record<string, 'fraud' | 'safe' | null>>({})
     const [submitting, setSubmitting] = useState(false)
     const [submitResults, setSubmitResults] = useState<Record<string, { success: boolean; message: string; devices_flagged?: string[] }>>({})
+    
+    // Pre-populate decisions from existing resolutions (loaded from KV store)
+    useEffect(() => {
+        if (Object.keys(existingResolutions).length > 0) {
+            setAccountDecisions(prev => {
+                const updated = { ...prev }
+                for (const [accountId, resolution] of Object.entries(existingResolutions)) {
+                    // Only set if not already decided in current session
+                    if (updated[accountId] === undefined && resolution !== null) {
+                        updated[accountId] = resolution
+                    }
+                }
+                return updated
+            })
+            // Also mark them as already submitted
+            setSubmitResults(prev => {
+                const updated = { ...prev }
+                for (const [accountId, resolution] of Object.entries(existingResolutions)) {
+                    if (resolution !== null && !updated[accountId]) {
+                        updated[accountId] = {
+                            success: true,
+                            message: resolution === 'fraud' ? 'Previously confirmed as fraud' : 'Previously cleared'
+                        }
+                    }
+                }
+                return updated
+            })
+        }
+    }, [existingResolutions])
     
     // Filter to high-risk accounts (risk_score >= 50)
     const highRiskAccounts = accountPredictions.filter(p => p.risk_score >= 50)

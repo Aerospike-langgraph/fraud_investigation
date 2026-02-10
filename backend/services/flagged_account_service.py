@@ -23,6 +23,7 @@ from gremlin_python.process.traversal import P
 
 from services.ml_service import ml_model_service
 from services.graph_service import GraphService
+from services.progress_service import progress_service
 
 logger = logging.getLogger('fraud_detection.flagged_accounts')
 
@@ -332,10 +333,17 @@ class FlaggedAccountService:
             "source": "account-fact"
         }
         
+        # Operation ID for progress tracking
+        OPERATION_ID = "ml_detection"
+        
         try:
             with self._lock:
+                # Start progress tracking
+                progress_service.start_operation(OPERATION_ID, 100, "Initializing ML detection...")
+                
                 # Step 1: Optionally compute features first
                 if compute_features and self._feature_service:
+                    progress_service.update_progress(OPERATION_ID, 0, "Computing account and device features...")
                     logger.info("Computing account and device features...")
                     feature_result = self._feature_service.run_feature_computation_job(
                         window_days=self._config["cooldown_days"]
@@ -346,6 +354,7 @@ class FlaggedAccountService:
                     }
                 
                 # Step 2: Get users from Aerospike for evaluation
+                progress_service.update_progress(OPERATION_ID, 0, "Fetching users for evaluation...")
                 effective_cooldown = 0 if skip_cooldown else self._config["cooldown_days"]
                 all_users = self._aerospike.get_users_for_evaluation(
                     cooldown_days=effective_cooldown,
@@ -355,10 +364,14 @@ class FlaggedAccountService:
                 job_result["total_users"] = total_users
                 job_result["accounts_skipped_cooldown"] = total_users - len(all_users) if not skip_cooldown else 0
                 
+                # Update progress with actual user count
+                progress_service.start_operation(OPERATION_ID, len(all_users), f"Evaluating {len(all_users)} users...")
+                
                 cooldown_msg = " (cooldown skipped)" if skip_cooldown else ""
                 logger.info(f"Starting detection job for {len(all_users)} users{cooldown_msg}")
                 
                 # Step 3: Evaluate each user
+                user_count = 0
                 for user in all_users:
                     user_id = user.get("user_id")
                     if not user_id:
@@ -416,8 +429,18 @@ class FlaggedAccountService:
                     except Exception as e:
                         logger.error(f"Error evaluating user {user_id}: {e}")
                         job_result["errors"].append(f"User {user_id}: {str(e)}")
+                    
+                    # Update progress every 10 users
+                    user_count += 1
+                    if user_count % 10 == 0:
+                        progress_service.update_progress(
+                            OPERATION_ID,
+                            user_count,
+                            f"Evaluated {job_result['users_evaluated']} users, flagged {job_result['newly_flagged']}"
+                        )
                 
                 # Step 4: Update device flags based on computed device-facts
+                progress_service.update_progress(OPERATION_ID, user_count, "Updating device flags...")
                 self._update_device_flags()
                 
                 # Update job result
@@ -432,6 +455,17 @@ class FlaggedAccountService:
                 # Save data
                 self._save_data()
                 
+                # Complete progress tracking
+                progress_service.complete_operation(
+                    OPERATION_ID,
+                    f"Completed! {job_result['users_evaluated']} users, {job_result['newly_flagged']} flagged",
+                    extra={
+                        "users_evaluated": job_result["users_evaluated"],
+                        "accounts_evaluated": job_result["accounts_evaluated"],
+                        "newly_flagged": job_result["newly_flagged"],
+                    }
+                )
+                
                 logger.info(f"Detection job completed: users={job_result['users_evaluated']}, "
                            f"accounts={job_result['accounts_evaluated']}, "
                            f"flagged={job_result['newly_flagged']}")
@@ -445,6 +479,7 @@ class FlaggedAccountService:
             job_result["end_time"] = datetime.now().isoformat()
             self._detection_history.append(job_result)
             self._save_data()
+            progress_service.fail_operation(OPERATION_ID, str(e), "ML detection failed")
             return job_result
     
     def _get_user_accounts_from_graph(self, user_id: str) -> Dict[str, Dict]:
@@ -955,6 +990,25 @@ class FlaggedAccountService:
                 if device_result.get("errors"):
                     result["errors"].extend(device_result["errors"])
                 
+                # Update flagged_accounts status for the user who owns this account
+                if self._use_aerospike():
+                    try:
+                        # Get user_id from account_id (format: A{user_id}{suffix})
+                        # Account A894002 belongs to user U8940
+                        user_id = f"U{account_id[1:-2]}" if account_id.startswith('A') else None
+                        if user_id:
+                            flagged_account = self._aerospike.get_flagged_account(user_id)
+                            if flagged_account:
+                                self._aerospike.update_flagged_account(user_id, {
+                                    "status": "confirmed_fraud",
+                                    "resolution": "confirmed_fraud",
+                                    "resolution_date": datetime.now().isoformat(),
+                                    "resolution_notes": notes or "Confirmed fraud by analyst"
+                                })
+                                result["flagged_account_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"Flagged account update error: {e}")
+                
                 logger.info(f"Account {account_id} confirmed as fraud. Flagged {len(result['devices_flagged'])} devices.")
                 
             elif resolution == "cleared":
@@ -982,6 +1036,24 @@ class FlaggedAccountService:
                             result["kv_updated"] = True
                     except Exception as e:
                         result["errors"].append(f"KV update error: {e}")
+                
+                # Update flagged_accounts status for the user who owns this account
+                if self._use_aerospike():
+                    try:
+                        # Get user_id from account_id (format: A{user_id}{suffix})
+                        user_id = f"U{account_id[1:-2]}" if account_id.startswith('A') else None
+                        if user_id:
+                            flagged_account = self._aerospike.get_flagged_account(user_id)
+                            if flagged_account:
+                                self._aerospike.update_flagged_account(user_id, {
+                                    "status": "cleared",
+                                    "resolution": "cleared",
+                                    "resolution_date": datetime.now().isoformat(),
+                                    "resolution_notes": notes or "Cleared by analyst"
+                                })
+                                result["flagged_account_updated"] = True
+                    except Exception as e:
+                        result["errors"].append(f"Flagged account update error: {e}")
                 
                 logger.info(f"Account {account_id} cleared.")
             

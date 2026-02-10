@@ -393,6 +393,58 @@ export function useInvestigation() {
     setState(initialState);
   }, [cleanup]);
 
+  // Load existing investigation from KV store
+  const loadExistingInvestigation = useCallback(async (userId: string): Promise<boolean> => {
+    try {
+      console.log(`[Investigation] Checking for existing investigation for user ${userId}`);
+      
+      const response = await fetch(`/api/investigation/user/${userId}/latest`);
+      if (!response.ok) {
+        console.log("[Investigation] No existing investigation found (API error)");
+        return false;
+      }
+      
+      const data = await response.json();
+      
+      if (!data.found || !data.investigation) {
+        console.log("[Investigation] No existing investigation found for user");
+        return false;
+      }
+      
+      const inv = data.investigation;
+      console.log(`[Investigation] Found existing investigation: ${inv.investigation_id}`);
+      
+      // Restore state from saved investigation
+      setState({
+        investigation_id: inv.investigation_id,
+        user_id: inv.user_id,
+        status: "completed",
+        currentNode: "report_generation",
+        currentPhase: "complete",
+        steps: [
+          { id: "alert_validation", name: "Alert Validation", description: "Validate initial alert", phase: "validation" },
+          { id: "data_collection", name: "Data Collection", description: "Collect evidence", phase: "collection" },
+          { id: "llm_agent", name: "AI Agent Investigation", description: "AI analysis", phase: "analysis" },
+          { id: "report_generation", name: "Report Generation", description: "Generate report", phase: "reporting" },
+        ],
+        completedSteps: inv.completed_steps || ["alert_validation", "data_collection", "llm_agent", "report_generation"],
+        initialEvidence: inv.initial_evidence,
+        finalAssessment: inv.final_assessment,
+        toolCalls: inv.tool_calls || [],
+        traceEvents: [],
+        report: inv.report_markdown,
+        agentIterations: inv.agent_iterations || 0,
+      });
+      
+      console.log("[Investigation] Restored existing investigation state");
+      return true;
+      
+    } catch (error) {
+      console.error("[Investigation] Error loading existing investigation:", error);
+      return false;
+    }
+  }, []);
+
   // Get step status
   const getStepStatus = useCallback(
     (stepId: string): "pending" | "running" | "completed" => {
@@ -419,5 +471,6 @@ export function useInvestigation() {
     stopInvestigation,
     reset,
     getStepStatus,
+    loadExistingInvestigation,
   };
 }

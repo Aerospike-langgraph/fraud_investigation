@@ -18,11 +18,16 @@ from gremlin_python.process.graph_traversal import __
 from gremlin_python.structure.graph import Graph
 from gremlin_python.process.traversal import T
 
+from services.progress_service import progress_service
+
 logger = logging.getLogger('fraud_detection.gremlin_loader')
 
 
 class GremlinDataLoader:
     """Load graph data using Gremlin queries instead of bulk loader."""
+    
+    # Class-level operation ID for progress tracking
+    OPERATION_ID = "bulk_load"
     
     def __init__(self, graph_service, aerospike_service=None):
         self.graph = graph_service
@@ -86,8 +91,13 @@ class GremlinDataLoader:
         self._owns_edges = []
         self._uses_edges = []
         
+        # Initialize progress tracking (6 stages: users, accounts, devices, owns, uses, kv_sync)
+        total_stages = 6
+        progress_service.start_operation(self.OPERATION_ID, total_stages, "Initializing bulk load...")
+        
         try:
             # Check if data already exists
+            progress_service.update_progress(self.OPERATION_ID, 0, "Checking existing data...")
             existing = self._check_data_exists()
             total_existing = sum(existing.values())
             
@@ -99,30 +109,56 @@ class GremlinDataLoader:
                     logger.info("✅ Skipping data load - graph already has sufficient data")
                     result["skipped"] = True
                     result["message"] = f"Data already exists: {existing['users']} users, {existing['accounts']} accounts, {existing['devices']} devices"
+                    progress_service.complete_operation(
+                        self.OPERATION_ID, 
+                        f"Skipped - data exists: {existing['users']} users",
+                        extra={"skipped": True}
+                    )
                     return result
             
             # Load vertices (these have upsert logic)
+            progress_service.update_progress(self.OPERATION_ID, 0, "Loading users...")
             logger.info("Loading users...")
             result["vertices"]["users"] = self._load_users(f"{vertices_path}/users/users.csv")
+            progress_service.update_progress(self.OPERATION_ID, 1, f"Loaded {result['vertices']['users']} users")
             
+            progress_service.update_progress(self.OPERATION_ID, 1, "Loading accounts...")
             logger.info("Loading accounts (fraud_flag=False)...")
             result["vertices"]["accounts"] = self._load_accounts(f"{vertices_path}/accounts/accounts.csv")
+            progress_service.update_progress(self.OPERATION_ID, 2, f"Loaded {result['vertices']['accounts']} accounts")
             
+            progress_service.update_progress(self.OPERATION_ID, 2, "Loading devices...")
             logger.info("Loading devices (fraud_flag=False)...")
             result["vertices"]["devices"] = self._load_devices(f"{vertices_path}/devices/devices.csv")
+            progress_service.update_progress(self.OPERATION_ID, 3, f"Loaded {result['vertices']['devices']} devices")
             
             # Load edges (with duplicate checking)
+            progress_service.update_progress(self.OPERATION_ID, 3, "Loading OWNS edges...")
             logger.info("Loading OWNS edges...")
             result["edges"]["owns"] = self._load_owns_edges(f"{edges_path}/ownership/owns.csv")
+            progress_service.update_progress(self.OPERATION_ID, 4, f"Loaded {result['edges']['owns']} OWNS edges")
             
+            progress_service.update_progress(self.OPERATION_ID, 4, "Loading USES edges...")
             logger.info("Loading USES edges...")
             result["edges"]["uses"] = self._load_uses_edges(f"{edges_path}/usage/uses.csv")
+            progress_service.update_progress(self.OPERATION_ID, 5, f"Loaded {result['edges']['uses']} USES edges")
             
             # Sync to KV store if enabled
             if sync_kv and self.kv and self.kv.is_connected():
+                progress_service.update_progress(self.OPERATION_ID, 5, "Syncing to KV store...")
                 logger.info("Syncing to KV store...")
                 kv_result = self._sync_to_kv()
                 result["kv_sync"] = kv_result
+            
+            progress_service.complete_operation(
+                self.OPERATION_ID,
+                f"Complete! {result['vertices']['users']} users, {result['vertices']['accounts']} accounts, {result['vertices']['devices']} devices",
+                extra={
+                    "users": result["vertices"]["users"],
+                    "accounts": result["vertices"]["accounts"],
+                    "devices": result["vertices"]["devices"],
+                }
+            )
             
             logger.info(f"✅ Data loading complete: {result}")
             
@@ -130,6 +166,7 @@ class GremlinDataLoader:
             logger.error(f"Error loading data: {e}")
             result["success"] = False
             result["errors"].append(str(e))
+            progress_service.fail_operation(self.OPERATION_ID, str(e), "Bulk load failed")
             
         return result
     
