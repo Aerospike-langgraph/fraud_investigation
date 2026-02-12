@@ -19,10 +19,12 @@ export default function TableData({ item, type, className, label, result }: Prop
         : label?.subtitle ? result[label.subtitle]
             : label?.badge ? result[label.badge.text] : ""
     if(item === 'sender') {
-        value = result.OUT[1]
+        // Support both old Graph DB format (OUT array) and new KV format (sender field)
+        value = result.sender ?? result.OUT?.[1] ?? ""
     }
     if(item === 'receiver') {
-        value = result.IN[1]
+        // Support both old Graph DB format (IN array) and new KV format (receiver field)
+        value = result.receiver ?? result.IN?.[1] ?? ""
     }
     
     let risk = { level: "low", color: "success" }

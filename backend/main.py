@@ -36,7 +36,7 @@ logger = get_logger('fraud_detection.api')
 # Initialize services
 graph_service = GraphService()
 fraud_service = FraudService(graph_service)
-transaction_generator = TransactionGeneratorService(graph_service, fraud_service)
+transaction_generator = TransactionGeneratorService(graph_service, fraud_service, aerospike_service)
 flagged_account_service = FlaggedAccountService(graph_service)
 investigation_service: Optional[InvestigationService] = None
 feature_service: Optional[FeatureService] = None
@@ -58,6 +58,8 @@ async def lifespan(app: FastAPI):
         logger.info("Aerospike KV service connected")
         # Update flagged account service to use Aerospike
         flagged_account_service.set_aerospike_service(aerospike_service)
+        # Update fraud service to use Aerospike for KV transaction flagging
+        fraud_service.aerospike_service = aerospike_service
         
         # Initialize feature service
         feature_service = FeatureService(aerospike_service, graph_service)
@@ -208,49 +210,99 @@ def get_dashboard_stats():
 @app.get("/users")
 def get_users(
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int | None = Query(None, ge=1, le=100, description="Number of users per page"),
+    page_size: int = Query(20, ge=1, le=100, description="Number of users per page"),
     order_by: str = Query('name', description="Field to order results by"),
     order: str = Query('asc', description="Direction to order results"),
     query: str | None = Query(None, description="Search term for user name or ID")
 ):
-    """Get paginated list of all users"""
+    """Get paginated list of all users from KV store"""
     try:
-        return graph_service.search("user", page, page_size, order_by, order, query)
+        return aerospike_service.get_all_users_paginated(page, page_size, order_by, order, query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get users: {str(e)}")
 
 
 @app.get("/users/stats")
 def get_users_stats():
-    """Get user stats"""
+    """Get user stats from KV store"""
     try:
-        return graph_service.get_user_stats()
+        # Get stats by scanning users in KV
+        stats = aerospike_service.get_user_stats()
+        return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get users: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user stats: {str(e)}")
 
 
 @app.get("/users/{user_id}")
 def get_user(user_id: str):
-    """Get user's profile, connected accounts, and transaction summary"""
+    """Get user's profile with accounts and devices from KV store"""
     try:
-        user_summary = graph_service.get_user_summary(user_id)
-        if not user_summary:
+        user = aerospike_service.get_user(user_id)
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        return user_summary
+        
+        # Calculate risk level from risk score
+        risk_score = user.get('risk_score', 0) or user.get('curr_risk', 0) or 0
+        if risk_score < 25:
+            risk_level = "LOW"
+        elif risk_score < 50:
+            risk_level = "MEDIUM"
+        elif risk_score < 75:
+            risk_level = "HIGH"
+        else:
+            risk_level = "CRITICAL"
+        
+        # Format response to match frontend expectations
+        # Convert nested accounts/devices maps to arrays
+        accounts_map = user.get('accounts', {})
+        devices_map = user.get('devices', {})
+        
+        accounts_list = [
+            {'id': acc_id, **acc_data}
+            for acc_id, acc_data in accounts_map.items()
+        ] if isinstance(accounts_map, dict) else []
+        
+        devices_list = [
+            {'id': dev_id, **dev_data}
+            for dev_id, dev_data in devices_map.items()
+        ] if isinstance(devices_map, dict) else []
+        
+        return {
+            "user": {
+                "id": user_id,
+                "name": user.get('name', ''),
+                "email": user.get('email', ''),
+                "phone": user.get('phone', ''),
+                "age": user.get('age', 0),
+                "location": user.get('location', ''),
+                "occupation": user.get('occupation', ''),
+                "signup_date": user.get('signup_date', ''),
+                "risk_score": risk_score,
+                "is_flagged": user.get('is_flagged', False),
+            },
+            "risk_level": risk_level,
+            "accounts": accounts_list,
+            "devices": devices_list,
+        }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get user summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user: {str(e)}")
 
 
 @app.get("/users/{user_id}/accounts")
 def get_user_accounts(user_id: str):
-    """Get all accounts for a specific user"""
+    """Get all accounts for a specific user from KV store"""
     try:
-        accounts = graph_service.get_user_accounts(user_id)
-        if not accounts:
+        user = aerospike_service.get_user(user_id)
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        return {"user_id": user_id, "accounts": accounts}
+        accounts_map = user.get('accounts', {})
+        accounts_list = [
+            {'id': acc_id, **acc_data}
+            for acc_id, acc_data in accounts_map.items()
+        ] if isinstance(accounts_map, dict) else []
+        return {"user_id": user_id, "accounts": accounts_list}
     except HTTPException:
         raise
     except Exception as e:
@@ -259,12 +311,17 @@ def get_user_accounts(user_id: str):
 
 @app.get("/users/{user_id}/devices")
 def get_user_devices(user_id: str):
-    """Get all devices for a specific user"""
+    """Get all devices for a specific user from KV store"""
     try:
-        devices = graph_service.get_user_devices(user_id)
-        if not devices:
+        user = aerospike_service.get_user(user_id)
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        return {"user_id": user_id, "devices": devices}
+        devices_map = user.get('devices', {})
+        devices_list = [
+            {'id': dev_id, **dev_data}
+            for dev_id, dev_data in devices_map.items()
+        ] if isinstance(devices_map, dict) else []
+        return {"user_id": user_id, "devices": devices_list}
     except HTTPException:
         raise
     except Exception as e:
@@ -277,27 +334,31 @@ def get_user_transactions(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Number of transactions per page")
 ):
-    """Get paginated list of transactions for a specific user"""
+    """Get paginated list of transactions for a specific user (not implemented for KV)"""
     try:
-        transactions = graph_service.get_user_transactions(user_id, page, page_size)
-        if not transactions:
-            raise HTTPException(status_code=404, detail="User not found")
-        return transactions
-    except HTTPException:
-        raise
+        # User transactions would require scanning by user_id across transaction records
+        # For now, return empty - use /transactions endpoint with day filter instead
+        return {
+            "result": [],
+            "total": 0,
+            "total_pages": 0,
+            "page": page,
+            "page_size": page_size
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user transactions: {str(e)}")
 
 
 @app.get("/users/{user_id}/connected-devices")
 def get_user_connected_devices(user_id: str = Path(..., description="User ID")):
-    """Get users who share devices with the specified user"""
+    """Get users who share devices with the specified user (requires graph traversal - not available in KV)"""
     try:
-        connected_users = graph_service.get_user_connected_devices(user_id)
+        # Connected devices requires graph traversal to find shared device relationships
+        # KV store doesn't have this relationship data, returning empty
         return {
             "user_id": user_id,
-            "connected_users": connected_users,
-            "total_connections": len(connected_users)
+            "connected_users": [],
+            "total_connections": 0
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get connected device users: {str(e)}")
@@ -312,13 +373,14 @@ def get_user_connected_devices(user_id: str = Path(..., description="User ID")):
 def get_transactions(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(12, ge=1, le=100, description="Number of transactions per page"),
-    order_by: str = Query('name', description="Field to order results by"),
-    order: str = Query('asc', description="Direction to order results"),
-    query: str | None = Query(None, description="Search term for user name or ID")
+    day: str | None = Query(None, description="Date filter (YYYY-MM-DD), defaults to today")
 ):
-    """Get paginated list of all transactions"""
+    """Get paginated list of transactions for today (or specified day) from KV store"""
     try:
-        results = graph_service.search("txns", page, page_size, order_by, order, query)
+        # Default to today's date if not specified
+        if not day:
+            day = datetime.now().strftime('%Y-%m-%d')
+        results = aerospike_service.get_transactions_by_day(day, page, page_size)
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get transactions: {str(e)}")
@@ -336,12 +398,12 @@ def delete_all_transactions():
 
 @app.get("/transactions/stats")
 def get_transaction_stats():
-    """Get transaction stats"""
+    """Get transaction stats from KV store"""
     try:
-        results = graph_service.get_transaction_stats()
+        results = aerospike_service.get_transaction_stats()
         return results
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get users: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get transaction stats: {str(e)}")
 
 
 @app.get("/transactions/flagged")
@@ -349,17 +411,98 @@ def get_flagged_transactions(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(12, ge=1, le=100, description="Number of transactions per page")
 ):
-    """Get paginated list of transactions that have been flagged by fraud detection"""
+    """Get paginated list of transactions that have been flagged by fraud detection from KV store"""
     try:
-        results = graph_service.get_flagged_transactions_paginated(page, page_size)
+        results = aerospike_service.get_flagged_transactions(page, page_size)
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get flagged transactions: {str(e)}")
 
 
+@app.get("/transaction/{account_id}/{day}/{txn_id}")
+def get_transaction_detail_kv(account_id: str, day: str, txn_id: str):
+    """Get transaction details from KV store by account_id, day, and txn_id"""
+    try:
+        txn = aerospike_service.get_transaction_by_id(account_id, day, txn_id)
+        if not txn:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        # Get sender and receiver user details from KV
+        sender_user = aerospike_service.get_user(txn.get('user_id', '')) if txn.get('user_id') else None
+        receiver_user = aerospike_service.get_user(txn.get('counterparty_user_id', '')) if txn.get('counterparty_user_id') else None
+        
+        # Get account details from user's accounts map
+        counterparty_account_id = txn.get('counterparty', '')
+        
+        sender_account = {}
+        if sender_user and sender_user.get('accounts'):
+            sender_account = sender_user['accounts'].get(account_id, {})
+        
+        receiver_account = {}
+        if receiver_user and receiver_user.get('accounts'):
+            receiver_account = receiver_user['accounts'].get(counterparty_account_id, {})
+        
+        # Get fraud details from Graph DB (RT1, RT2, RT3 results)
+        fraud_details = graph_service.get_fraud_details_by_txn_id(txn_id)
+        
+        # Build response matching frontend expectations
+        return {
+            "txn": {
+                "txn_id": txn.get('txn_id', ''),
+                "amount": txn.get('amount', 0),
+                "type": txn.get('type', 'transfer'),
+                "method": txn.get('method', 'electronic'),
+                "location": txn.get('location', ''),
+                "timestamp": txn.get('timestamp', ''),
+                "status": txn.get('status', 'completed'),
+                "is_fraud": txn.get('is_fraud', False),
+                "fraud_score": txn.get('fraud_score', 0),
+                "device_id": txn.get('device_id', ''),
+                # Include fraud details from Graph for the Fraud Analysis tab
+                "details": fraud_details.get('details', []) if fraud_details else [],
+                "fraud_status": fraud_details.get('fraud_status', '') if fraud_details else '',
+                "eval_timestamp": fraud_details.get('eval_timestamp', '') if fraud_details else '',
+            },
+            "src": {
+                "account": {
+                    "id": account_id,
+                    "type": sender_account.get('type', ''),
+                    "balance": sender_account.get('balance', 0),
+                    "bank_name": sender_account.get('bank_name', ''),
+                    "status": sender_account.get('status', 'active'),
+                },
+                "user": {
+                    "id": txn.get('user_id', ''),
+                    "name": sender_user.get('name', '') if sender_user else '',
+                    "email": sender_user.get('email', '') if sender_user else '',
+                    "location": sender_user.get('location', '') if sender_user else '',
+                } if sender_user else None,
+            },
+            "dest": {
+                "account": {
+                    "id": counterparty_account_id,
+                    "type": receiver_account.get('type', ''),
+                    "balance": receiver_account.get('balance', 0),
+                    "bank_name": receiver_account.get('bank_name', ''),
+                    "status": receiver_account.get('status', 'active'),
+                },
+                "user": {
+                    "id": txn.get('counterparty_user_id', ''),
+                    "name": receiver_user.get('name', '') if receiver_user else '',
+                    "email": receiver_user.get('email', '') if receiver_user else '',
+                    "location": receiver_user.get('location', '') if receiver_user else '',
+                } if receiver_user else None,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get transaction detail: {str(e)}")
+
+
 @app.get("/transaction/{transaction_id}")
-def get_transaction_detail(transaction_id: str):
-    """Get transaction details and related entities"""
+def get_transaction_detail_legacy(transaction_id: str):
+    """Legacy: Get transaction details from Graph by txn_id (backward compatibility)"""
     try:
         transaction_detail = graph_service.get_transaction_summary(urllib.parse.unquote(transaction_id))
         if not transaction_detail:

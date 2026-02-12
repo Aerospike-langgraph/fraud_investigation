@@ -733,11 +733,22 @@ class GraphService:
             }
 
 
-    def get_transaction_summary(self, txn_edge_id: str) -> Optional[Dict[str, Any]]:
-        """Get detailed transaction information"""
+    def get_transaction_summary(self, txn_id_or_edge_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed transaction information by txn_id or edge ID"""
         try:
             if self.client:
-                txn_detail = (self.client.E(txn_edge_id)
+                # First try to find by txn_id property (for KV-sourced transaction links)
+                edges = self.client.E().has("txn_id", txn_id_or_edge_id).toList()
+                
+                if not edges:
+                    # Not found by txn_id - transaction may not exist in Graph
+                    logger.warning(f"Transaction with txn_id '{txn_id_or_edge_id}' not found in Graph DB")
+                    return None
+                
+                # Found by txn_id property - use the edge ID
+                edge_id = edges[0].id
+                
+                txn_detail = (self.client.E(edge_id)
                     .project("txn", "src", "dest")
                     .by(__.elementMap())
                     .by(__.outV()
@@ -761,7 +772,7 @@ class GraphService:
                 raise Exception("Graph client not available. Cannot get transaction detail without graph database connection.")
                 
         except Exception as e:
-            logger.error(f"Error getting transaction detail: {e}")
+            logger.error(f"Error getting transaction detail for {txn_id_or_edge_id}: {e}")
             return None
 
 
@@ -1177,6 +1188,63 @@ class GraphService:
         except Exception as e:
             logger.error(f"Error in get_transaction_fraud_results: {e}")
             return [] 
+    
+    def get_fraud_details_by_txn_id(self, txn_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get fraud detection details from Graph DB by transaction ID.
+        
+        Returns fraud details including RT1, RT2, RT3 rule results if the transaction was flagged.
+        Details are returned as JSON strings (as stored in Graph) for frontend to parse.
+        """
+        try:
+            if not self.client:
+                return None
+            
+            # Find the TRANSACTS edge by txn_id property
+            edges = self.client.E().has_label('TRANSACTS').has('txn_id', txn_id).valueMap(True).toList()
+            
+            if not edges:
+                return None
+            
+            edge = edges[0]
+            
+            # Check if this transaction has fraud details
+            is_fraud = edge.get('is_fraud', [False])
+            is_fraud = is_fraud[0] if isinstance(is_fraud, list) else is_fraud
+            
+            if not is_fraud:
+                return None
+            
+            # Get the details array (contains JSON strings for each RT rule)
+            # Return as-is since frontend expects JSON strings to parse
+            details_raw = edge.get('details', [])
+            
+            # Details is already a list of JSON strings from Graph
+            # No need to unwrap - just ensure it's a list
+            if not isinstance(details_raw, list):
+                details_raw = [details_raw] if details_raw else []
+            
+            # Get other fraud properties
+            fraud_score = edge.get('fraud_score', [0])
+            fraud_score = fraud_score[0] if isinstance(fraud_score, list) else fraud_score
+            
+            fraud_status = edge.get('fraud_status', [''])
+            fraud_status = fraud_status[0] if isinstance(fraud_status, list) else fraud_status
+            
+            eval_timestamp = edge.get('eval_timestamp', [''])
+            eval_timestamp = eval_timestamp[0] if isinstance(eval_timestamp, list) else eval_timestamp
+            
+            return {
+                'is_fraud': True,
+                'fraud_score': fraud_score,
+                'fraud_status': fraud_status,
+                'eval_timestamp': eval_timestamp,
+                'details': details_raw  # Return as JSON strings for frontend to parse
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting fraud details for txn_id {txn_id}: {e}")
+            return None
         
 
     # ----------------------------------------------------------------------------------------------------------

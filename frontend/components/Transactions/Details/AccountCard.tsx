@@ -19,8 +19,12 @@ const AccountCard = ({
 	user
  }: Props) => {
     const isSource = variant === 'source';
-    const { balance, created_date, type } = account
-    const { email, name, location } = user
+    const { balance, created_date, type } = account ?? {}
+    const { email, name, location } = user ?? {}
+    
+    // Support both old Graph format (account['1']) and new KV format (account.id)
+    const accountId = account?.id ?? account?.['1'] ?? ''
+    const userId = user?.id ?? user?.['1'] ?? ''
 
     return (
         <Card>
@@ -36,35 +40,35 @@ const AccountCard = ({
                 <Label
                     size='lg'
                     title='Account ID'
-                    text={account[1]} />
+                    text={accountId} />
                 <Label
                     size='lg'
                     title='Account Type'
-                    text={type} />
+                    text={type ?? 'N/A'} />
                 <Label
                     size='lg'
                     title='Balance'
-                    className={`font-semibold ${balance < 0 ? 'text-destructive' : 'text-green-600'}`}
-                    text={formatCurrency(balance)} />
+                    className={`font-semibold ${(balance ?? 0) < 0 ? 'text-destructive' : 'text-green-600'}`}
+                    text={formatCurrency(balance ?? 0)} />
                 <Label
                     size='lg'
                     title='Owner'
-                    subtitle={email}
+                    subtitle={email ?? ''}
                     icon='user'
-                    text={name} />
+                    text={name ?? 'Unknown'} />
                 <Label
                     size='sm'
                     title='Created'
                     icon='calendar'
-                    text={formatDate(created_date)} />
+                    text={formatDate(created_date ?? '')} />
                 <Label
                     size='sm'
                     title='Location'
                     icon='map-pin'
-                    text={location} />
+                    text={location ?? 'N/A'} />
             </CardContent>
             <CardFooter>
-                <Link href={`/users/${user[1]}`} className="w-full">
+                <Link href={`/users/${userId}`} className="w-full">
                     <Button variant="outline" className="w-full">
                         <ExternalLink className="h-4 w-4 mr-2" />
                         View User Profile

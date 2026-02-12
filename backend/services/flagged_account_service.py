@@ -634,6 +634,12 @@ class FlaggedAccountService:
                             "fraud_reason": f"Connected to confirmed fraud account {account_id}",
                             "fraud_date": datetime.now().isoformat()
                         })
+                    
+                    # Also flag device in user's devices map
+                    # Get user_id from account_id (format: A{user_id}{suffix})
+                    user_id = f"U{account_id[1:-2]}" if account_id.startswith('A') else None
+                    if user_id:
+                        self._aerospike.flag_device_in_user(user_id, device_id, True)
                 
                 result["devices_flagged"].append(device_id)
                 logger.info(f"Flagged device {device_id} as fraud (connected to account {account_id})")
@@ -984,6 +990,16 @@ class FlaggedAccountService:
                     except Exception as e:
                         result["errors"].append(f"KV update error: {e}")
                 
+                # Flag account in user's accounts map (KV users set)
+                if self._use_aerospike():
+                    try:
+                        # Get user_id from account_id (format: A{user_id}{suffix})
+                        user_id_for_flag = f"U{account_id[1:-2]}" if account_id.startswith('A') else None
+                        if user_id_for_flag:
+                            self._aerospike.flag_account_in_user(user_id_for_flag, account_id, True)
+                    except Exception as e:
+                        result["errors"].append(f"KV user account flag error: {e}")
+                
                 # Flag devices used in this account's transactions
                 device_result = self.flag_devices_for_confirmed_fraud(account_id)
                 result["devices_flagged"] = device_result.get("devices_flagged", [])
@@ -1036,6 +1052,15 @@ class FlaggedAccountService:
                             result["kv_updated"] = True
                     except Exception as e:
                         result["errors"].append(f"KV update error: {e}")
+                
+                # Clear fraud flag for account in user's accounts map (KV users set)
+                if self._use_aerospike():
+                    try:
+                        user_id_for_flag = f"U{account_id[1:-2]}" if account_id.startswith('A') else None
+                        if user_id_for_flag:
+                            self._aerospike.flag_account_in_user(user_id_for_flag, account_id, False)
+                    except Exception as e:
+                        result["errors"].append(f"KV user account clear error: {e}")
                 
                 # Update flagged_accounts status for the user who owns this account
                 if self._use_aerospike():

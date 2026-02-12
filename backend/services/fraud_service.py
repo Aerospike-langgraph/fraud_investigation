@@ -16,8 +16,9 @@ logger.setLevel(logging.ERROR)
 class FraudService:
     """Fraud Detection Service"""
     
-    def __init__(self, graph_service: GraphService):
+    def __init__(self, graph_service: GraphService, aerospike_service=None):
         self.graph_service = graph_service
+        self.aerospike_service = aerospike_service
         self.rt1_enabled = True
         self.rt2_enabled = True
         self.rt3_enabled = True
@@ -102,6 +103,35 @@ class FraudService:
                 .property("eval_timestamp", datetime.now().isoformat())
                 .property("details", details)
                 .next())
+            
+            # Also flag the transaction in KV store (both sender and receiver records)
+            if self.aerospike_service:
+                try:
+                    # Get sender, receiver, timestamp and txn_id from the edge
+                    edge_props = (self.graph_service.client.E(edge_id)
+                        .project("sender", "receiver", "timestamp", "txn_id")
+                        .by(__.outV().id_())
+                        .by(__.inV().id_())
+                        .by(__.values("timestamp"))
+                        .by(__.values("txn_id"))
+                        .next())
+                    
+                    sender_account_id = edge_props.get("sender")
+                    receiver_account_id = edge_props.get("receiver")
+                    timestamp = edge_props.get("timestamp")
+                    txn_id = edge_props.get("txn_id")
+                    
+                    # Flag BOTH sender and receiver records in KV
+                    if sender_account_id and timestamp:
+                        self.aerospike_service.flag_transaction_in_kv(
+                            sender_account_id, timestamp, True, fraud_score, txn_id
+                        )
+                    if receiver_account_id and timestamp:
+                        self.aerospike_service.flag_transaction_in_kv(
+                            receiver_account_id, timestamp, True, fraud_score, txn_id
+                        )
+                except Exception as kv_error:
+                    logger.error(f"Failed to flag transaction in KV: {kv_error}")
             
         except Exception as e:
             raise Exception(f"Error storing fraud result: {e}")

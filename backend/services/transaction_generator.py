@@ -39,9 +39,10 @@ def get_stored_max_transaction_rate():
         return 50
 
 class TransactionGeneratorService:
-    def __init__(self, graph_service: GraphService, fraud_service: FraudService):
+    def __init__(self, graph_service: GraphService, fraud_service: FraudService, aerospike_service=None):
         self.graph_service = graph_service
         self.fraud_service = fraud_service
+        self.kv = aerospike_service  # KV store for dual-write
         self.is_running = False
         self.max_generation_rate = get_stored_max_transaction_rate()
         self.generation_rate = 1  # transactions per second
@@ -195,19 +196,26 @@ class TransactionGeneratorService:
             if from_id == to_id:
                 raise Exception("Source and destination accounts cannot be the same")
 
-            # Get sender's user and their devices for device tracking
+            # Get sender's and receiver's user IDs and sender's devices for tracking
             device_id = None
+            sender_user_id = None
+            receiver_user_id = None
             try:
-                # Account -> User (via reverse OWNS edge)
+                # Account -> User (via reverse OWNS edge) for sender
                 user_ids = self.graph_service.client.V(from_id).in_("OWNS").id_().toList()
                 if user_ids:
-                    user_id = user_ids[0]
+                    sender_user_id = user_ids[0]
                     # User -> Devices (via USES edge)
-                    user_devices = self.graph_service.client.V(user_id).out("USES").id_().toList()
+                    user_devices = self.graph_service.client.V(sender_user_id).out("USES").id_().toList()
                     if user_devices:
                         device_id = random.choice(user_devices)
+                
+                # Get receiver's user_id
+                receiver_user_ids = self.graph_service.client.V(to_id).in_("OWNS").id_().toList()
+                if receiver_user_ids:
+                    receiver_user_id = receiver_user_ids[0]
             except Exception as e:
-                logger.debug(f"Could not get device for transaction: {e}")
+                logger.debug(f"Could not get user/device for transaction: {e}")
 
             # Create transaction
             txn_id = str(uuid.uuid4())
@@ -229,9 +237,41 @@ class TransactionGeneratorService:
                 edge_builder = edge_builder.property("device_id", device_id)
             
             edge_id = edge_builder.id_().next()
+            timestamp = datetime.now().isoformat()
             
             self.transaction_counter += 1
             logger.info(f"✅ Transaction {txn_id} stored in graph database with both sender and receiver edges")
+            
+            # Write to KV store (dual-write)
+            if self.kv and self.kv.is_connected():
+                try:
+                    txn_data = {
+                        "txn_id": txn_id,
+                        "amount": round(amount, 2),
+                        "type": type,
+                        "method": "electronic_transfer",
+                        "location": random.choice(self.normal_locations),
+                        "timestamp": timestamp,
+                        "status": "completed",
+                        "device_id": device_id,
+                    }
+                    
+                    # Sender's outgoing transaction
+                    self.kv.store_transaction(
+                        from_id,
+                        {**txn_data, "counterparty": to_id, "user_id": sender_user_id, "counterparty_user_id": receiver_user_id},
+                        direction="out"
+                    )
+                    
+                    # Receiver's incoming transaction
+                    self.kv.store_transaction(
+                        to_id,
+                        {**txn_data, "counterparty": from_id, "user_id": receiver_user_id, "counterparty_user_id": sender_user_id},
+                        direction="in"
+                    )
+                    logger.info(f"✅ Transaction {txn_id} also stored in KV store")
+                except Exception as e:
+                    logger.warning(f"Failed to write transaction to KV: {e}")
                        
             # Run fraud detection
             try:
