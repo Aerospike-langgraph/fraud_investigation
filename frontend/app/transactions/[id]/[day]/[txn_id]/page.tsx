@@ -18,13 +18,13 @@ const API_BASE_URL = process.env.BASE_URL || "http://localhost:8080/api"
 export default async function TransactionDetailPage({ 
 	params 
 }: { 
-	params: Promise<{ account_id: string; day: string; txn_id: string }> 
+	params: Promise<{ id: string; day: string; txn_id: string }> 
 }) {
-	const { account_id, day, txn_id } = await params;
+	const { id, day, txn_id } = await params;
 	
-	// Use the new KV-based endpoint with account_id, day, and txn_id
+	// Use the new KV-based endpoint with id (account_id), day, and txn_id
 	const response = await fetch(
-		`${API_BASE_URL}/transaction/${encodeURIComponent(account_id)}/${encodeURIComponent(day)}/${encodeURIComponent(txn_id)}`, 
+		`${API_BASE_URL}/transaction/${encodeURIComponent(id)}/${encodeURIComponent(day)}/${encodeURIComponent(txn_id)}`, 
 		{ cache: 'no-store' }
 	)
 	const { txn, src, dest }: TxnDetail = await response.json() 

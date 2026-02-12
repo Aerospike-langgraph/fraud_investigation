@@ -33,7 +33,6 @@ class GremlinDataLoader:
         self.graph = graph_service
         self.kv = aerospike_service  # For KV sync
         self.batch_size = 100
-        self.kv_batch_size = 500  # Larger batch size for KV writes
         
         # Track loaded data for KV sync
         self._loaded_users = {}      # {user_id: user_data}
@@ -41,9 +40,6 @@ class GremlinDataLoader:
         self._loaded_devices = {}    # {device_id: device_data}
         self._owns_edges = []        # [(user_id, account_id), ...]
         self._uses_edges = []        # [(user_id, device_id), ...]
-        
-        # Optimization flags
-        self._skip_exists_check = False  # Skip vertex existence checks for empty DB
         
     def _check_data_exists(self) -> Dict[str, int]:
         """Check if data already exists in the graph database."""
@@ -104,11 +100,6 @@ class GremlinDataLoader:
             progress_service.update_progress(self.OPERATION_ID, 0, "Checking existing data...")
             existing = self._check_data_exists()
             total_existing = sum(existing.values())
-            
-            # OPTIMIZATION: Skip existence checks if database is empty
-            self._skip_exists_check = (total_existing == 0)
-            if self._skip_exists_check:
-                logger.info("🚀 Database is empty - enabling fast insert mode (skipping existence checks)")
             
             if total_existing > 0:
                 logger.info(f"📊 Data already exists in graph: {existing}")
@@ -229,11 +220,10 @@ class GremlinDataLoader:
         """Insert a batch of users (upsert - skip if exists)."""
         for user in batch:
             try:
-                # OPTIMIZATION: Skip existence check if DB was empty at start
-                if not self._skip_exists_check:
-                    exists = self.graph.client.V(user["id"]).hasNext()
-                    if exists:
-                        continue  # Skip existing vertices
+                # Check if vertex exists first
+                exists = self.graph.client.V(user["id"]).hasNext()
+                if exists:
+                    continue  # Skip existing vertices
                     
                 # Use T.id to set the actual vertex ID
                 self.graph.client.addV("user") \
@@ -297,11 +287,10 @@ class GremlinDataLoader:
         """Insert a batch of accounts (upsert - skip if exists)."""
         for account in batch:
             try:
-                # OPTIMIZATION: Skip existence check if DB was empty at start
-                if not self._skip_exists_check:
-                    exists = self.graph.client.V(account["id"]).hasNext()
-                    if exists:
-                        continue  # Skip existing vertices
+                # Check if vertex exists first
+                exists = self.graph.client.V(account["id"]).hasNext()
+                if exists:
+                    continue  # Skip existing vertices
                     
                 # Use T.id to set the actual vertex ID
                 self.graph.client.addV("account") \
@@ -365,11 +354,10 @@ class GremlinDataLoader:
         """Insert a batch of devices (upsert - skip if exists)."""
         for device in batch:
             try:
-                # OPTIMIZATION: Skip existence check if DB was empty at start
-                if not self._skip_exists_check:
-                    exists = self.graph.client.V(device["id"]).hasNext()
-                    if exists:
-                        continue  # Skip existing vertices
+                # Check if vertex exists first
+                exists = self.graph.client.V(device["id"]).hasNext()
+                if exists:
+                    continue  # Skip existing vertices
                     
                 # Use T.id to set the actual vertex ID
                 self.graph.client.addV("device") \
@@ -407,25 +395,24 @@ class GremlinDataLoader:
                         self._owns_edges.append((from_id, to_id))
                         
                         try:
-                            # OPTIMIZATION: Skip edge existence check if DB was empty at start
-                            if not self._skip_exists_check:
-                                edge_exists = self.graph.client.V(from_id) \
-                                    .outE("OWNS") \
-                                    .where(__.inV().hasId(to_id)) \
-                                    .hasNext()
-                                
-                                if edge_exists:
-                                    skipped += 1
-                                    continue  # Skip duplicate edge
+                            # Check if edge already exists between these vertices
+                            edge_exists = self.graph.client.V(from_id) \
+                                .outE("OWNS") \
+                                .where(__.inV().hasId(to_id)) \
+                                .hasNext()
                             
-                            # Create edge
+                            if edge_exists:
+                                skipped += 1
+                                continue  # Skip duplicate edge
+                            
+                            # Create edge only if it doesn't exist
                             self.graph.client.V(from_id) \
                                 .addE("OWNS") \
                                 .to(__.V(to_id)) \
                                 .iterate()
                             count += 1
                             if count % 5000 == 0:
-                                logger.info(f"Loaded {count} OWNS edges...")
+                                logger.info(f"Loaded {count} OWNS edges (skipped {skipped} existing)...")
                         except Exception as e:
                             errors += 1
                             if errors <= 5:
@@ -463,25 +450,24 @@ class GremlinDataLoader:
                         self._uses_edges.append((from_id, to_id))
                         
                         try:
-                            # OPTIMIZATION: Skip edge existence check if DB was empty at start
-                            if not self._skip_exists_check:
-                                edge_exists = self.graph.client.V(from_id) \
-                                    .outE("USES") \
-                                    .where(__.inV().hasId(to_id)) \
-                                    .hasNext()
-                                
-                                if edge_exists:
-                                    skipped += 1
-                                    continue  # Skip duplicate edge
+                            # Check if edge already exists between these vertices
+                            edge_exists = self.graph.client.V(from_id) \
+                                .outE("USES") \
+                                .where(__.inV().hasId(to_id)) \
+                                .hasNext()
                             
-                            # Create edge
+                            if edge_exists:
+                                skipped += 1
+                                continue  # Skip duplicate edge
+                            
+                            # Create edge only if it doesn't exist
                             self.graph.client.V(from_id) \
                                 .addE("USES") \
                                 .to(__.V(to_id)) \
                                 .iterate()
                             count += 1
                             if count % 5000 == 0:
-                                logger.info(f"Loaded {count} USES edges...")
+                                logger.info(f"Loaded {count} USES edges (skipped {skipped} existing)...")
                         except Exception as e:
                             errors += 1
                             if errors <= 5:
@@ -504,7 +490,7 @@ class GremlinDataLoader:
     
     def _sync_to_kv(self) -> Dict[str, int]:
         """
-        Sync loaded data to KV store using batch writes for better performance.
+        Sync loaded data to KV store.
         Creates users with nested accounts and devices maps.
         """
         result = {
@@ -533,9 +519,7 @@ class GremlinDataLoader:
                     user_devices[user_id] = []
                 user_devices[user_id].append(device_id)
             
-            # Prepare all user records for batch writing
-            batch_records = []
-            
+            # Create KV user records with nested accounts and devices
             for user_id, user_data in self._loaded_users.items():
                 try:
                     # Build accounts map
@@ -548,7 +532,6 @@ class GremlinDataLoader:
                             'bank_name': account_data.get('bank_name', ''),
                             'status': account_data.get('status', 'active'),
                             'created_date': account_data.get('created_date', ''),
-                            'is_fraud': False,  # Initialize at creation time
                         }
                         result["accounts_linked"] += 1
                     
@@ -563,7 +546,6 @@ class GremlinDataLoader:
                             'fingerprint': device_data.get('fingerprint', ''),
                             'first_seen': device_data.get('first_seen', ''),
                             'last_login': device_data.get('last_login', ''),
-                            'is_fraud': False,  # Initialize at creation time
                         }
                         result["devices_linked"] += 1
                     
@@ -581,32 +563,21 @@ class GremlinDataLoader:
                         "created_at": datetime.now().isoformat(),
                         "accounts": accounts_map,
                         "devices": devices_map,
-                        "last_eval": "",  # Use empty string instead of None
+                        "last_eval": None,
                         "eval_count": 0,
-                        "curr_risk": 0.0,  # Use 0.0 instead of None
+                        "curr_risk": None,
                     }
                     
-                    batch_records.append((user_id, kv_user_data))
-                    
-                    # OPTIMIZATION: Write in batches of kv_batch_size
-                    if len(batch_records) >= self.kv_batch_size:
-                        batch_result = self.kv.batch_put('users', batch_records)
-                        result["users"] += batch_result.get("success", 0)
-                        result["errors"] += batch_result.get("failed", 0)
-                        batch_records = []
-                        logger.info(f"KV sync progress: {result['users']} users written...")
+                    if self.kv.put('users', user_id, kv_user_data):
+                        result["users"] += 1
+                    else:
+                        result["errors"] += 1
                         
                 except Exception as e:
                     result["errors"] += 1
-                    logger.warning(f"Error preparing user {user_id} for KV: {e}")
+                    logger.warning(f"Error syncing user {user_id} to KV: {e}")
             
-            # Write any remaining records
-            if batch_records:
-                batch_result = self.kv.batch_put('users', batch_records)
-                result["users"] += batch_result.get("success", 0)
-                result["errors"] += batch_result.get("failed", 0)
-            
-            logger.info(f"🚀 KV sync complete (batch mode): {result['users']} users, "
+            logger.info(f"KV sync complete: {result['users']} users, "
                        f"{result['accounts_linked']} accounts linked, "
                        f"{result['devices_linked']} devices linked")
             

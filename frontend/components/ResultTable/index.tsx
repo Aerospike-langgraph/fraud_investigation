@@ -141,13 +141,7 @@ const Results = ({
                             ))
                         ) : (
                             results.length > 0 ? (
-                                results.map((result: Record<string, any>) => {
-                                    // For transactions, construct URL with account_id/day/txn_id
-                                    const detailUrl = pathname === '/transactions' && result.account_id && result.day
-                                        ? `${pathname}/${encodeURIComponent(result.account_id)}/${encodeURIComponent(result.day)}/${encodeURIComponent(result.id)}`
-                                        : `${pathname}/${encodeURIComponent(result.id)}`;
-                                    
-                                    return (
+                                results.map((result: Record<string, any>) => (
                                     <tr 
                                         key={result.id} 
                                         className={clsx(
@@ -162,7 +156,7 @@ const Results = ({
                                             <TableData {...opts} key={idx} result={result} />
                                         ))}
                                         <td className="p-3">
-                                            <Link href={detailUrl}>
+                                            <Link href={`${pathname}/${encodeURIComponent(result.id)}`}>
                                                 <Button variant="outline" size="sm">
                                                     <Eye className="h-4 w-4 mr-1" />
                                                     View Details
@@ -170,7 +164,7 @@ const Results = ({
                                             </Link>
                                         </td>
                                     </tr>
-                                )})
+                                ))
                             ) : (
                                 <tr className="w-full h-full">
                                     <td className="text-muted-foreground w-full h-full text-center" colSpan={options.length + 1} rowSpan={pageSize}>
