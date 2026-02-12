@@ -241,17 +241,24 @@ class TransactionInjector:
         
         # Get sender's user and their devices for device tracking
         device_id = None
+        sender_user_id = None
+        receiver_user_id = None
         try:
             # Account -> User (via reverse OWNS edge)
             user_ids = self.graph.client.V(sender_id).in_("OWNS").id_().toList()
             if user_ids:
-                user_id = user_ids[0]
+                sender_user_id = user_ids[0]
                 # User -> Devices (via USES edge)
-                user_devices = self.graph.client.V(user_id).out("USES").id_().toList()
+                user_devices = self.graph.client.V(sender_user_id).out("USES").id_().toList()
                 if user_devices:
                     device_id = random.choice(user_devices)
+            
+            # Get receiver's user_id
+            receiver_user_ids = self.graph.client.V(receiver_id).in_("OWNS").id_().toList()
+            if receiver_user_ids:
+                receiver_user_id = receiver_user_ids[0]
         except Exception as e:
-            logger.debug(f"Could not get device for transaction: {e}")
+            logger.debug(f"Could not get user/device for transaction: {e}")
         
         # Write to Graph
         try:
@@ -290,17 +297,17 @@ class TransactionInjector:
                 "device_id": device_id,  # Include device_id in KV record
             }
             
-            # Sender's outgoing transaction
+            # Sender's outgoing transaction (includes sender's user_id and receiver's user_id as counterparty)
             sender_success = self.kv.store_transaction(
                 sender_id,
-                {**txn_data, "counterparty": receiver_id},
+                {**txn_data, "counterparty": receiver_id, "user_id": sender_user_id, "counterparty_user_id": receiver_user_id},
                 direction="out"
             )
             
-            # Receiver's incoming transaction
+            # Receiver's incoming transaction (includes receiver's user_id and sender's user_id as counterparty)
             receiver_success = self.kv.store_transaction(
                 receiver_id,
-                {**txn_data, "counterparty": sender_id},
+                {**txn_data, "counterparty": sender_id, "user_id": receiver_user_id, "counterparty_user_id": sender_user_id},
                 direction="in"
             )
             

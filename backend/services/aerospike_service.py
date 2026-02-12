@@ -10,6 +10,7 @@ Used for:
 """
 
 import logging
+import math
 import os
 import csv
 from datetime import datetime, timedelta
@@ -132,11 +133,33 @@ class AerospikeService:
             self.client = aerospike.client(config).connect()
             self.connected = True
             logger.info(f"✅ Connected to Aerospike at {AEROSPIKE_HOST}:{AEROSPIKE_PORT}")
+            # Create secondary indexes after connection
+            self.create_secondary_indexes()
             return True
         except Exception as e:
             logger.error(f"❌ Failed to connect to Aerospike: {e}")
             self.connected = False
             return False
+    
+    def create_secondary_indexes(self):
+        """Create secondary indexes for efficient queries."""
+        if not self.is_connected():
+            return
+        
+        try:
+            # Create index on 'day' bin for transactions set (for querying by date)
+            self.client.index_string_create(
+                self.namespace,
+                SET_TRANSACTIONS,
+                'day',
+                'idx_txn_day'
+            )
+            logger.info("✅ Created secondary index 'idx_txn_day' on transactions.day")
+        except ex.IndexFoundError:
+            # Index already exists - this is fine
+            logger.info("ℹ️ Secondary index 'idx_txn_day' already exists")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to create secondary index 'idx_txn_day': {e}")
     
     def close(self):
         """Close Aerospike connection."""
@@ -202,6 +225,67 @@ class AerospikeService:
         except Exception as e:
             logger.error(f"Error putting record {key} in {set_name}: {e}")
             return False
+    
+    def batch_put(self, set_name: str, records: List[tuple]) -> Dict[str, int]:
+        """
+        Store multiple records in Aerospike using batch write for better performance.
+        
+        Args:
+            set_name: The set name
+            records: List of tuples (key, data_dict) to store
+            
+        Returns:
+            Dict with 'success' and 'failed' counts
+        """
+        result = {"success": 0, "failed": 0}
+        
+        if not self.is_connected() or not records:
+            return result
+        
+        try:
+            # Process records in parallel using batch write
+            # Aerospike batch_write uses BatchRecords
+            from aerospike_helpers.batch import records as batch_records
+            from aerospike_helpers import operations as ops
+            
+            batch_recs = batch_records.BatchRecords()
+            
+            for key, data in records:
+                record_key = (self.namespace, set_name, key)
+                # Shorten bin names
+                shortened_data = self._shorten_bin_names(data)
+                # Create write operations for each bin
+                write_ops = [ops.write(k, v) for k, v in shortened_data.items()]
+                batch_recs.batch_write.add(key=record_key, ops=write_ops)
+            
+            # Execute batch write
+            self.client.batch_write(batch_recs)
+            
+            # Count results
+            for rec in batch_recs.batch_write:
+                if rec.result == 0:  # AEROSPIKE_OK
+                    result["success"] += 1
+                else:
+                    result["failed"] += 1
+                    
+        except ImportError:
+            # Fallback to sequential writes if batch helpers not available
+            logger.warning("Batch helpers not available, falling back to sequential writes")
+            for key, data in records:
+                if self.put(set_name, key, data):
+                    result["success"] += 1
+                else:
+                    result["failed"] += 1
+        except Exception as e:
+            logger.error(f"Error in batch_put: {e}")
+            # Fallback to sequential on error
+            for key, data in records:
+                if self.put(set_name, key, data):
+                    result["success"] += 1
+                else:
+                    result["failed"] += 1
+        
+        return result
     
     def get(self, set_name: str, key: str) -> Optional[Dict[str, Any]]:
         """
@@ -575,6 +659,218 @@ class AerospikeService:
         
         return eligible_users
     
+    def get_all_users_paginated(self, page: int = 1, page_size: int = 20, 
+                                 order_by: str = 'name', order: str = 'asc', 
+                                 query: str = None) -> Dict[str, Any]:
+        """
+        Get paginated users from KV store with optional search and sorting.
+        
+        Args:
+            page: Page number (1-indexed)
+            page_size: Number of users per page
+            order_by: Field to sort by
+            order: Sort direction ('asc' or 'desc')
+            query: Optional search term for filtering by name or user_id
+            
+        Returns:
+            Dict with result, total count, total_pages and pagination info
+        """
+        users = self.scan_all(SET_USERS, limit=100000)
+        
+        # Filter by search query if provided
+        if query:
+            query_lower = query.lower()
+            users = [
+                u for u in users 
+                if query_lower in u.get('name', '').lower() 
+                or query_lower in u.get('user_id', '').lower()
+            ]
+        
+        # Ensure each user has an 'id' field (frontend expects this)
+        for user in users:
+            if 'id' not in user:
+                user['id'] = user.get('user_id', '')
+        
+        # Sort users
+        reverse = order.lower() == 'desc'
+        try:
+            users.sort(key=lambda x: x.get(order_by, '') or '', reverse=reverse)
+        except Exception:
+            # If sorting fails, continue with unsorted
+            pass
+        
+        # Paginate
+        total = len(users)
+        total_pages = math.ceil(total / page_size) if page_size > 0 else 0
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        return {
+            'result': users[start:end],  # Frontend expects 'result' not 'results'
+            'total': total,
+            'total_pages': total_pages,
+            'page': page,
+            'page_size': page_size
+        }
+    
+    def get_user_stats(self) -> Dict[str, Any]:
+        """
+        Get user statistics from KV store.
+        
+        Returns:
+            Dict with total_users, total_low_risk, total_med_risk, total_high_risk
+        """
+        if not self.is_connected():
+            return {"total_users": 0, "total_low_risk": 0, "total_med_risk": 0, "total_high_risk": 0}
+        
+        try:
+            total_users = 0
+            total_low_risk = 0
+            total_med_risk = 0
+            total_high_risk = 0
+            
+            scan = self.client.scan(self.namespace, SET_USERS)
+            
+            def process_user(record):
+                nonlocal total_users, total_low_risk, total_med_risk, total_high_risk
+                if record and len(record) > 2 and record[2]:
+                    bins = record[2]
+                    total_users += 1
+                    risk_score = bins.get('curr_risk', 0) or bins.get('risk_score', 0) or 0
+                    if risk_score >= 70:
+                        total_high_risk += 1
+                    elif risk_score >= 25:
+                        total_med_risk += 1
+                    else:
+                        total_low_risk += 1
+            
+            scan.foreach(process_user)
+            
+            return {
+                "total_users": total_users,
+                "total_low_risk": total_low_risk,
+                "total_med_risk": total_med_risk,
+                "total_high_risk": total_high_risk
+            }
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+            return {"total_users": 0, "total_low_risk": 0, "total_med_risk": 0, "total_high_risk": 0}
+    
+    def get_transaction_stats(self) -> Dict[str, Any]:
+        """
+        Get transaction statistics from KV store.
+        
+        Returns:
+            Dict with total_txns, total_blocked, total_review, total_clean
+        """
+        if not self.is_connected():
+            return {"total_txns": 0, "total_blocked": 0, "total_review": 0, "total_clean": 0}
+        
+        try:
+            total_txns = 0
+            total_blocked = 0
+            total_review = 0
+            total_clean = 0
+            
+            scan = self.client.scan(self.namespace, SET_TRANSACTIONS)
+            
+            def process_txn_record(record):
+                nonlocal total_txns, total_blocked, total_review, total_clean
+                if record and len(record) > 2 and record[2]:
+                    bins = record[2]
+                    txs_map = bins.get('txs', {})
+                    for ts, txn in txs_map.items():
+                        # Only count outgoing to avoid double counting
+                        if txn.get('direction') != 'out':
+                            continue
+                        total_txns += 1
+                        if txn.get('is_fraud'):
+                            fraud_score = txn.get('fraud_score', 0) or 0
+                            if fraud_score >= 90:
+                                total_blocked += 1
+                            else:
+                                total_review += 1
+                        else:
+                            total_clean += 1
+            
+            scan.foreach(process_txn_record)
+            
+            return {
+                "total_txns": total_txns,
+                "total_blocked": total_blocked,
+                "total_review": total_review,
+                "total_clean": total_clean
+            }
+        except Exception as e:
+            logger.error(f"Error getting transaction stats: {e}")
+            return {"total_txns": 0, "total_blocked": 0, "total_review": 0, "total_clean": 0}
+    
+    def get_flagged_transactions(self, page: int = 1, page_size: int = 12) -> Dict[str, Any]:
+        """
+        Get paginated list of flagged transactions from KV store.
+        
+        Args:
+            page: Page number (1-indexed)
+            page_size: Number of transactions per page
+            
+        Returns:
+            Dict with result, total count, total_pages and pagination info
+        """
+        if not self.is_connected():
+            return {'result': [], 'total': 0, 'total_pages': 0, 'page': page, 'page_size': page_size}
+        
+        try:
+            flagged_txns = []
+            
+            scan = self.client.scan(self.namespace, SET_TRANSACTIONS)
+            
+            def process_txn_record(record):
+                if record and len(record) > 2 and record[2]:
+                    bins = record[2]
+                    txs_map = bins.get('txs', {})
+                    account_id = bins.get('account_id', '')
+                    day = bins.get('day', '')
+                    for ts, txn in txs_map.items():
+                        # Only include outgoing fraud transactions
+                        if txn.get('direction') == 'out' and txn.get('is_fraud'):
+                            flagged_txns.append({
+                                'id': txn.get('txn_id', ''),
+                                'txn_id': txn.get('txn_id', ''),
+                                'account_id': account_id,
+                                'day': day,
+                                'sender': account_id,
+                                'receiver': txn.get('counterparty', ''),
+                                'amount': txn.get('amount', 0),
+                                'fraud_score': txn.get('fraud_score', 0) or 0,
+                                'timestamp': ts,
+                                'location': txn.get('location', ''),
+                                'fraud_status': 'blocked' if (txn.get('fraud_score', 0) or 0) >= 90 else 'review',
+                                'type': txn.get('type', ''),
+                                'is_fraud': True,
+                            })
+            
+            scan.foreach(process_txn_record)
+            
+            # Sort by timestamp descending
+            flagged_txns.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+            
+            # Paginate
+            total = len(flagged_txns)
+            total_pages = math.ceil(total / page_size) if page_size > 0 else 0
+            start = (page - 1) * page_size
+            end = start + page_size
+            
+            return {
+                'result': flagged_txns[start:end],
+                'total': total,
+                'total_pages': total_pages,
+                'page': page,
+                'page_size': page_size
+            }
+        except Exception as e:
+            logger.error(f"Error getting flagged transactions: {e}")
+            return {'result': [], 'total': 0, 'total_pages': 0, 'page': page, 'page_size': page_size}
+    
     def update_user_evaluation(self, user_id: str, risk_score: float) -> bool:
         """Update user's evaluation data."""
         user = self.get_user(user_id)
@@ -610,6 +906,7 @@ class AerospikeService:
             'bank_name': account_data.get('bank_name', ''),
             'status': account_data.get('status', 'active'),
             'created_date': account_data.get('created_date', ''),
+            'is_fraud': False,  # Initialize at creation time
         }
         user['accounts'] = accounts
         
@@ -639,6 +936,7 @@ class AerospikeService:
             'fingerprint': device_data.get('fingerprint', ''),
             'first_seen': device_data.get('first_seen', ''),
             'last_login': device_data.get('last_login', ''),
+            'is_fraud': False,  # Initialize at creation time
         }
         user['devices'] = devices
         
@@ -653,6 +951,113 @@ class AerospikeService:
         """Get all devices for a user."""
         user = self.get_user(user_id)
         return user.get('devices', {}) if user else {}
+    
+    def flag_account_in_user(self, user_id: str, account_id: str, is_fraud: bool) -> bool:
+        """
+        Update is_fraud flag for an account in user's accounts map.
+        
+        Args:
+            user_id: The user ID
+            account_id: The account ID to flag
+            is_fraud: True if fraudulent, False otherwise
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        user = self.get_user(user_id)
+        if not user or 'accounts' not in user:
+            logger.warning(f"User {user_id} not found or has no accounts")
+            return False
+        
+        if account_id not in user['accounts']:
+            logger.warning(f"Account {account_id} not found in user {user_id}")
+            return False
+        
+        user['accounts'][account_id]['is_fraud'] = is_fraud
+        success = self.put(SET_USERS, user_id, user)
+        if success:
+            logger.info(f"✅ Flagged account {account_id} in user {user_id}: is_fraud={is_fraud}")
+        return success
+    
+    def flag_device_in_user(self, user_id: str, device_id: str, is_fraud: bool) -> bool:
+        """
+        Update is_fraud flag for a device in user's devices map.
+        
+        Args:
+            user_id: The user ID
+            device_id: The device ID to flag
+            is_fraud: True if fraudulent, False otherwise
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        user = self.get_user(user_id)
+        if not user or 'devices' not in user:
+            logger.warning(f"User {user_id} not found or has no devices")
+            return False
+        
+        if device_id not in user['devices']:
+            logger.warning(f"Device {device_id} not found in user {user_id}")
+            return False
+        
+        user['devices'][device_id]['is_fraud'] = is_fraud
+        success = self.put(SET_USERS, user_id, user)
+        if success:
+            logger.info(f"✅ Flagged device {device_id} in user {user_id}: is_fraud={is_fraud}")
+        return success
+    
+    def flag_transaction_in_kv(self, account_id: str, timestamp: str, is_fraud: bool, fraud_score: float = 0, txn_id: str = None) -> bool:
+        """
+        Update is_fraud flag for a transaction in KV store.
+        
+        Args:
+            account_id: The account ID (sender or receiver)
+            timestamp: Transaction timestamp (used for record key lookup)
+            is_fraud: True if fraudulent, False otherwise
+            fraud_score: The fraud score to set
+            txn_id: Optional transaction ID to match by (more reliable than timestamp)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            record_key = self._get_transaction_key(account_id, timestamp)
+            key = (self.namespace, SET_TRANSACTIONS, record_key)
+            
+            _, _, bins = self.client.get(key)
+            if not bins or 'txs' not in bins:
+                logger.warning(f"Transaction record not found for {account_id} at {timestamp}")
+                return False
+            
+            # Find transaction by txn_id if provided (more reliable), otherwise by timestamp
+            found_ts = None
+            for ts, txn in bins['txs'].items():
+                if txn_id and txn.get('txn_id') == txn_id:
+                    found_ts = ts
+                    break
+                elif not txn_id and ts == timestamp:
+                    found_ts = ts
+                    break
+            
+            if not found_ts:
+                logger.warning(f"Transaction not found in record (txn_id={txn_id}, timestamp={timestamp})")
+                return False
+            
+            bins['txs'][found_ts]['is_fraud'] = is_fraud
+            bins['txs'][found_ts]['fraud_score'] = fraud_score
+            self.client.put(key, bins)
+            logger.info(f"✅ Flagged transaction for {account_id}: is_fraud={is_fraud}, fraud_score={fraud_score}")
+            return True
+            
+        except ex.RecordNotFound:
+            logger.warning(f"Transaction record not found for {account_id} at {timestamp}")
+            return False
+        except Exception as e:
+            logger.error(f"Error flagging transaction in KV: {e}")
+            return False
     
     # ----------------------------------------------------------------------------------------------------------
     # Flagged Accounts Operations
@@ -777,7 +1182,7 @@ class AerospikeService:
                 dt = datetime.now()
         else:
             dt = datetime.now()
-        return f"{account_id}:{dt.strftime('%Y-%m')}"
+        return f"{account_id}:{dt.strftime('%Y-%m-%d')}"
     
     def store_transaction(self, account_id: str, txn_data: Dict[str, Any], direction: str = "out") -> bool:
         """
@@ -804,10 +1209,14 @@ class AerospikeService:
                 'amount': float(txn_data.get('amount', 0)),
                 'type': txn_data.get('type', 'transfer'),
                 'counterparty': txn_data.get('counterparty', ''),
+                'user_id': txn_data.get('user_id', ''),  # Sender's user_id
+                'counterparty_user_id': txn_data.get('counterparty_user_id', ''),  # Receiver's user_id
                 'direction': direction,
                 'method': txn_data.get('method', 'electronic'),
                 'location': txn_data.get('location', ''),
                 'status': txn_data.get('status', 'completed'),
+                'device_id': txn_data.get('device_id', ''),  # Device used for transaction
+                'is_fraud': False,  # Initialize at creation time
             }
             
             # Get existing record or create new
@@ -825,7 +1234,7 @@ class AerospikeService:
             data = {
                 'txs': txs_map,
                 'account_id': account_id,
-                'year_month': record_key.split(':')[1]
+                'day': record_key.split(':')[1]  # YYYY-MM-DD format for secondary index
             }
             self.client.put(key, data)
             return True
@@ -853,11 +1262,11 @@ class AerospikeService:
             now = datetime.now()
             cutoff = (now - timedelta(days=days)).isoformat()
             
-            # Generate record keys for relevant months
+            # Generate record keys for each day (daily partitions)
             keys = []
-            for i in range(max(1, (days // 30) + 2)):  # Cover enough months
-                month_date = now - timedelta(days=30 * i)
-                record_key = f"{account_id}:{month_date.strftime('%Y-%m')}"
+            for i in range(days + 1):  # Include today plus lookback days
+                day_date = now - timedelta(days=i)
+                record_key = f"{account_id}:{day_date.strftime('%Y-%m-%d')}"
                 keys.append((self.namespace, SET_TRANSACTIONS, record_key))
             
             # Batch read records
@@ -900,14 +1309,14 @@ class AerospikeService:
             now = datetime.now()
             cutoff = (now - timedelta(days=days)).isoformat()
             
-            # Generate all keys for all accounts
+            # Generate all keys for all accounts (daily partitions)
             keys = []
             key_to_account = {}
             
             for account_id in account_ids:
-                for i in range(max(1, (days // 30) + 2)):
-                    month_date = now - timedelta(days=30 * i)
-                    record_key = f"{account_id}:{month_date.strftime('%Y-%m')}"
+                for i in range(days + 1):  # Include today plus lookback days
+                    day_date = now - timedelta(days=i)
+                    record_key = f"{account_id}:{day_date.strftime('%Y-%m-%d')}"
                     key = (self.namespace, SET_TRANSACTIONS, record_key)
                     keys.append(key)
                     key_to_account[record_key] = account_id
@@ -936,6 +1345,145 @@ class AerospikeService:
         except Exception as e:
             logger.error(f"Error batch getting transactions: {e}")
             return result
+    
+    def get_transactions_by_day(self, day: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """
+        Get all transactions for a specific day using secondary index query.
+        
+        Args:
+            day: Date in format YYYY-MM-DD
+            page: Page number (1-indexed)
+            page_size: Number of transactions per page
+            
+        Returns:
+            Dict with result, total count, total_pages and pagination info
+        """
+        if not self.is_connected():
+            return {'result': [], 'total': 0, 'total_pages': 0, 'page': page, 'page_size': page_size}
+        
+        try:
+            # Query using secondary index on 'day' bin
+            query = self.client.query(self.namespace, SET_TRANSACTIONS)
+            query.where(aerospike.predicates.equals('day', day))
+            
+            # Collect all transactions from matching records
+            all_transactions = []
+            
+            def process_record(record):
+                if record and len(record) > 2 and record[2]:
+                    bins = record[2]
+                    txs_map = bins.get('txs', {})
+                    account_id = bins.get('account_id', '')
+                    record_day = bins.get('day', '')
+                    for ts, txn in txs_map.items():
+                        # Only include outgoing transactions to avoid duplicates
+                        # Each transaction is stored twice (sender=out, receiver=in)
+                        if txn.get('direction') != 'out':
+                            continue
+                        
+                        # Format transaction for frontend (expects id, sender, receiver, fraud_score)
+                        # Include account_id and day for detail page KV lookup
+                        formatted_txn = {
+                            'id': txn.get('txn_id', ''),
+                            'txn_id': txn.get('txn_id', ''),
+                            'account_id': account_id,  # For KV lookup
+                            'day': record_day,  # For KV lookup
+                            'sender': account_id,
+                            'receiver': txn.get('counterparty', ''),
+                            'user_id': txn.get('user_id', ''),  # Sender's user
+                            'counterparty_user_id': txn.get('counterparty_user_id', ''),  # Receiver's user
+                            'amount': txn.get('amount', 0),
+                            'fraud_score': txn.get('fraud_score', 0) or 0,
+                            'timestamp': ts,
+                            'location': txn.get('location', ''),
+                            'fraud_status': 'blocked' if txn.get('is_fraud') else 'clean',
+                            'type': txn.get('type', ''),
+                            'method': txn.get('method', ''),
+                            'status': txn.get('status', 'completed'),
+                            'device_id': txn.get('device_id', ''),
+                            'is_fraud': txn.get('is_fraud', False),
+                        }
+                        all_transactions.append(formatted_txn)
+            
+            query.foreach(process_record)
+            
+            # Sort by timestamp descending
+            all_transactions.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+            
+            # Paginate
+            total = len(all_transactions)
+            total_pages = math.ceil(total / page_size) if page_size > 0 else 0
+            start = (page - 1) * page_size
+            end = start + page_size
+            
+            return {
+                'result': all_transactions[start:end],  # Frontend expects 'result' not 'results'
+                'total': total,
+                'total_pages': total_pages,
+                'page': page,
+                'page_size': page_size
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting transactions by day {day}: {e}")
+            return {'result': [], 'total': 0, 'total_pages': 0, 'page': page, 'page_size': page_size}
+    
+    def get_transaction_by_id(self, account_id: str, day: str, txn_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a single transaction from KV by account_id, day, and txn_id.
+        
+        Args:
+            account_id: The account ID (used in KV key)
+            day: The day in YYYY-MM-DD format (used in KV key)
+            txn_id: The transaction ID to find
+            
+        Returns:
+            Transaction dict with full details, or None if not found
+        """
+        if not self.is_connected():
+            return None
+        
+        try:
+            # Construct the KV key: {account_id}:{day}
+            record_key = f"{account_id}:{day}"
+            key = (self.namespace, SET_TRANSACTIONS, record_key)
+            
+            _, _, bins = self.client.get(key)
+            if not bins:
+                return None
+            
+            txs_map = bins.get('txs', {})
+            
+            # Search for the transaction by txn_id in the map
+            for ts, txn in txs_map.items():
+                if txn.get('txn_id') == txn_id:
+                    # Return formatted transaction with all details
+                    return {
+                        'txn_id': txn.get('txn_id', ''),
+                        'account_id': account_id,
+                        'day': day,
+                        'amount': txn.get('amount', 0),
+                        'type': txn.get('type', 'transfer'),
+                        'method': txn.get('method', 'electronic'),
+                        'location': txn.get('location', ''),
+                        'timestamp': ts,
+                        'status': txn.get('status', 'completed'),
+                        'counterparty': txn.get('counterparty', ''),
+                        'user_id': txn.get('user_id', ''),
+                        'counterparty_user_id': txn.get('counterparty_user_id', ''),
+                        'device_id': txn.get('device_id', ''),
+                        'direction': txn.get('direction', 'out'),
+                        'is_fraud': txn.get('is_fraud', False),
+                        'fraud_score': txn.get('fraud_score', 0),
+                    }
+            
+            return None
+            
+        except ex.RecordNotFound:
+            return None
+        except Exception as e:
+            logger.error(f"Error getting transaction {txn_id} for account {account_id} on {day}: {e}")
+            return None
     
     # ----------------------------------------------------------------------------------------------------------
     # Account-Fact Operations (Pre-computed features for ML)
