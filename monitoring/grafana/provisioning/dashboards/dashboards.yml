@@ -1,0 +1,24 @@
+apiVersion: 1
+
+providers:
+  - name: 'Custom'
+    orgId: 1
+    folder: 'Custom'
+    folderUid: 'custom'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/custom
+
+  - name: 'Aerospike'
+    orgId: 1
+    folder: 'Aerospike'
+    folderUid: 'aerospike'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/aerospike

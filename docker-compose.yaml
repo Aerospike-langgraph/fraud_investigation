@@ -128,9 +128,62 @@ services:
       - asgraph_net
     ports:
       - "4001:4001"
+  # Monitoring Stack
+  aerospike-exporter:
+    image: aerospike/aerospike-prometheus-exporter:latest
+    container_name: aerospike-exporter
+    depends_on:
+      aerospike-db:
+        condition: service_healthy
+    environment:
+      - AS_HOST=aerospike-db
+      - AS_PORT=3000
+    networks:
+      - asgraph_net
+    ports:
+      - "9145:9145"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    depends_on:
+      - aerospike-exporter
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - asgraph_net
+    ports:
+      - "9091:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards/custom
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards/aerospike
+    networks:
+      - asgraph_net
+    ports:
+      - "3030:3000"
+
 networks:
   asgraph_net:
     name: asgraph_net
 
 volumes:
   ollama_data:
+  prometheus_data:
+  grafana_data:
