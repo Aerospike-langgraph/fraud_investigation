@@ -3,8 +3,20 @@
 import { useState, useEffect, useRef } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { Slider } from '@/components/ui/slider'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Badge } from '@/components/ui/badge'
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table'
 import { 
     Database, 
     RefreshCw, 
@@ -22,7 +34,15 @@ import {
     Upload,
     FolderOpen,
     FileText,
-    Trash2
+    Trash2,
+    Timer,
+    Target,
+    Calendar,
+    Zap,
+    TrendingUp,
+    History,
+    ChevronDown,
+    ChevronUp
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -69,6 +89,36 @@ interface AerospikeStats {
     cleared: number
 }
 
+interface DetectionConfig {
+    schedule_enabled: boolean
+    schedule_time: string
+    cooldown_days: number
+    risk_threshold: number
+}
+
+interface SchedulerStatus {
+    scheduler_running: boolean
+    detection_job_scheduled: boolean
+    detection_job_running: boolean
+    next_run: string | null
+    last_run_result: any
+}
+
+interface JobHistoryItem {
+    job_id: string
+    start_time: string
+    end_time?: string
+    status: string
+    accounts_evaluated: number
+    users_evaluated?: number
+    accounts_skipped_cooldown: number
+    newly_flagged: number
+    total_accounts: number
+    total_users?: number
+    duration_seconds?: number
+    error?: string
+}
+
 const DataManagement = () => {
     const [bulkLoadStatus, setBulkLoadStatus] = useState<BulkLoadStatus>({ loading: false })
     const [isLoading, setIsLoading] = useState(false)
@@ -86,6 +136,7 @@ const DataManagement = () => {
     // Load options
     const [loadGraph, setLoadGraph] = useState(true)
     const [loadAerospike, setLoadAerospike] = useState(true)
+    const [bulkLoadCardCollapsed, setBulkLoadCardCollapsed] = useState(false)
     
     // Data source options
     const [useDefaultData, setUseDefaultData] = useState(true)
@@ -109,6 +160,37 @@ const DataManagement = () => {
     // Delete all data state
     const [deleteLoading, setDeleteLoading] = useState(false)
     const [confirmDelete, setConfirmDelete] = useState(false)
+
+    // ML Detection (moved from Fraud Detection tab)
+    const [detectionConfig, setDetectionConfig] = useState<DetectionConfig>({
+        schedule_enabled: true,
+        schedule_time: '21:30',
+        cooldown_days: 7,
+        risk_threshold: 70
+    })
+    const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null)
+    const [detectionHistory, setDetectionHistory] = useState<JobHistoryItem[]>([])
+    const [detectionLoading, setDetectionLoading] = useState(true)
+    const [saving, setSaving] = useState(false)
+    const [runningDetection, setRunningDetection] = useState(false)
+    const [skipCooldown, setSkipCooldown] = useState(false)
+    const [historyLoading, setHistoryLoading] = useState(true)
+    const [computingFeatures, setComputingFeatures] = useState(false)
+    const [featureResult, setFeatureResult] = useState<any>(null)
+    const [featureProgress, setFeatureProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
+    const [detectionProgress, setDetectionProgress] = useState<{
+        current: number
+        total: number
+        percentage: number
+        message: string
+        estimated_remaining_seconds: number | null
+    } | null>(null)
 
     // Fetch current graph statistics
     const fetchGraphStats = async () => {
@@ -146,9 +228,43 @@ const DataManagement = () => {
         }
     }
 
+    // Fetch detection config and status
+    const fetchConfig = async () => {
+        try {
+            const response = await fetch('/api/detection/config')
+            if (response.ok) {
+                const data = await response.json()
+                if (data.config) setDetectionConfig(data.config)
+                if (data.scheduler) setSchedulerStatus(data.scheduler)
+            }
+        } catch (error) {
+            console.error('Error fetching config:', error)
+        } finally {
+            setDetectionLoading(false)
+        }
+    }
+
+    // Fetch detection history
+    const fetchHistory = async () => {
+        setHistoryLoading(true)
+        try {
+            const response = await fetch('/api/detection/history?limit=10')
+            if (response.ok) {
+                const data = await response.json()
+                setDetectionHistory(data.history || [])
+            }
+        } catch (error) {
+            console.error('Error fetching history:', error)
+        } finally {
+            setHistoryLoading(false)
+        }
+    }
+
     useEffect(() => {
         fetchGraphStats()
         fetchAerospikeStats()
+        fetchConfig()
+        fetchHistory()
     }, [])
 
     // Trigger bulk load
@@ -461,70 +577,218 @@ const DataManagement = () => {
         }
     }
 
+    // Save detection config
+    const handleSaveConfig = async () => {
+        setSaving(true)
+        try {
+            const response = await fetch('/api/detection/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(detectionConfig)
+            })
+            if (response.ok) {
+                const data = await response.json()
+                setDetectionConfig(data.config)
+                setSchedulerStatus(data.scheduler)
+                toast.success('Configuration saved successfully')
+            } else {
+                toast.error('Failed to save configuration')
+            }
+        } catch (error) {
+            toast.error('Error saving configuration')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    // Compute features from KV transactions
+    const handleComputeFeatures = async () => {
+        setComputingFeatures(true)
+        setFeatureResult(null)
+        setFeatureProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        toast.info(`Computing features with ${detectionConfig.cooldown_days}-day window...`)
+        const progressInterval = setInterval(() => {
+            pollProgress('compute_features', setFeatureProgress)
+        }, 500)
+        try {
+            const response = await fetch(`/api/compute-features?window_days=${detectionConfig.cooldown_days}`, { method: 'POST' })
+            if (response.ok) {
+                const data = await response.json()
+                setFeatureResult(data)
+                setFeatureProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
+                toast.success(`Features computed! ${data.accounts_processed || 0} accounts, ${data.devices_processed || 0} devices.`)
+            } else {
+                const error = await response.json()
+                toast.error(error.detail || 'Feature computation failed')
+            }
+        } catch (error) {
+            toast.error('Error computing features')
+        } finally {
+            clearInterval(progressInterval)
+            setComputingFeatures(false)
+            setTimeout(() => setFeatureProgress(null), 2000)
+        }
+    }
+
+    // Run detection manually
+    const handleRunDetection = async () => {
+        setRunningDetection(true)
+        setDetectionProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        toast.info(skipCooldown ? 'Starting detection job (skipping cooldown)...' : 'Starting detection job...')
+        const progressInterval = setInterval(() => {
+            pollProgress('ml_detection', setDetectionProgress)
+        }, 500)
+        try {
+            const url = skipCooldown ? '/api/flagged-accounts/detect?skip_cooldown=true' : '/api/flagged-accounts/detect'
+            const response = await fetch(url, { method: 'POST' })
+            if (response.ok) {
+                const data = await response.json()
+                setDetectionProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
+                toast.success(`Detection completed! ${data.result?.newly_flagged || 0} users flagged.`)
+                fetchHistory()
+                fetchConfig()
+            } else {
+                const error = await response.json()
+                toast.error(error.detail || 'Detection job failed')
+            }
+        } catch (error) {
+            toast.error('Error running detection job')
+        } finally {
+            clearInterval(progressInterval)
+            setRunningDetection(false)
+            setTimeout(() => setDetectionProgress(null), 2000)
+        }
+    }
+
+    const formatDateTime = (dateStr: string) => new Date(dateStr).toLocaleString()
+    const formatDuration = (seconds: number) => {
+        if (seconds < 60) return `${seconds.toFixed(1)}s`
+        const mins = Math.floor(seconds / 60)
+        const secs = seconds % 60
+        return `${mins}m ${secs.toFixed(0)}s`
+    }
+
+    // Workflow progress: derive completion from state
+    const step1Done = !!(bulkLoadStatus.success || bulkLoadStatus.complete)
+    const step2Done = !!injectionResult
+    const step3Done = !!featureResult
+    const step4Done = detectionHistory.length > 0
+    const workflowSteps = [
+        { label: 'Bulk load data', done: step1Done },
+        { label: 'Inject transactions', done: step2Done },
+        { label: 'Calculate features', done: step3Done },
+        { label: 'Run ML model', done: step4Done },
+    ]
+
     return (
-        <div className="grid gap-6 md:grid-cols-2">
-            {/* Bulk Load Controls */}
-            <Card className="md:col-span-2">
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <Database className="h-5 w-5" />
-                        Bulk Data Load
-                    </CardTitle>
-                    <CardDescription>
-                        Simulates receiving account data from a third-party system. Load sample data into Graph DB and/or Aerospike KV store.
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="grid md:grid-cols-3 gap-4">
+        <div className="space-y-6 pb-4">
+            {/* Workflow progress */}
+            <Card className="overflow-hidden border-0 shadow-sm bg-muted/30">
+                <CardContent className="py-3 px-4">
+                    <p className="text-xs font-medium text-muted-foreground mb-3 uppercase tracking-wider">Pipeline progress</p>
+                    <div className="flex items-center gap-0 flex-wrap">
+                        {workflowSteps.map((step, i) => {
+                            const currentStep = workflowSteps.findIndex(s => !s.done)
+                            const isCurrent = currentStep === i
+                            return (
+                                <div key={i} className="flex items-center">
+                                    <div
+                                        className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+                                            step.done
+                                                ? 'bg-green-500/15 text-green-700 dark:text-green-400'
+                                                : isCurrent
+                                                    ? 'bg-primary/15 text-primary ring-1 ring-primary/30'
+                                                    : 'bg-muted text-muted-foreground'
+                                        }`}
+                                    >
+                                        {step.done ? (
+                                            <CheckCircle className="h-3.5 w-3.5 shrink-0" />
+                                        ) : (
+                                            <span className="w-3.5 h-3.5 flex items-center justify-center rounded-full bg-current/20 text-[10px] font-bold">
+                                                {i + 1}
+                                            </span>
+                                        )}
+                                        <span>{step.label}</span>
+                                    </div>
+                                    {i < workflowSteps.length - 1 && (
+                                        <span className="mx-1 text-muted-foreground/40" aria-hidden>→</span>
+                                    )}
+                                </div>
+                            )
+                        })}
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* Sections 1 & 2: side-by-side on large screens */}
+            <div className="grid gap-6 lg:grid-cols-2">
+            {/* Section: Ingest Data */}
+            <section className="space-y-3">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                    <span className="text-xs font-semibold uppercase tracking-wider">1</span>
+                    <span className="text-sm">Bulk load data</span>
+                </div>
+                <Card className="overflow-hidden border-0 shadow-sm bg-card h-full flex flex-col">
+                    <CardHeader className="pb-2 pt-4 px-4 flex flex-row items-start justify-between gap-2">
+                        <div>
+                            <CardTitle className="flex items-center gap-2 text-base">
+                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+                                    <Database className="h-4 w-4 text-primary" />
+                                </div>
+                                Bulk Data Load
+                            </CardTitle>
+                            <CardDescription className="mt-0.5 text-xs">
+                                Load sample data into Graph DB and/or Aerospike KV.
+                            </CardDescription>
+                        </div>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0"
+                            onClick={() => setBulkLoadCardCollapsed(c => !c)}
+                            aria-label={bulkLoadCardCollapsed ? 'Expand' : 'Collapse'}
+                        >
+                            {bulkLoadCardCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                        </Button>
+                            </CardHeader>
+                {!bulkLoadCardCollapsed && (
+                <CardContent className="space-y-3 px-4 pb-4 flex-1 flex flex-col">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         {/* Data Source Selection */}
-                        <div className="p-4 bg-muted/50 rounded-lg space-y-3">
-                            <p className="text-sm font-medium">Data Source:</p>
-                            <div className="space-y-2">
+                        <div className="rounded-lg border border-border/80 bg-muted/30 p-3 space-y-2">
+                            <p className="text-xs font-medium text-foreground">Data source</p>
+                            <div className="space-y-1.5">
                                 <button
                                     onClick={() => {
                                         setUseDefaultData(true)
                                         setUploadedFile(null)
                                     }}
-                                    className={`w-full p-3 rounded-lg border-2 transition-all text-left ${
-                                        useDefaultData 
-                                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30' 
-                                            : 'border-transparent bg-background hover:bg-muted'
+                                    className={`w-full p-2 rounded-md border transition-all text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                                        useDefaultData
+                                            ? 'border-primary bg-primary/5 dark:bg-primary/10'
+                                            : 'border-transparent bg-background hover:bg-muted/50'
                                     }`}
                                 >
-                                    <div className="flex items-center gap-2">
-                                        <FolderOpen className={`h-4 w-4 ${useDefaultData ? 'text-blue-500' : 'text-muted-foreground'}`} />
-                                        <span className="text-sm font-medium">Use Default Data</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <FolderOpen className={`h-3.5 w-3.5 shrink-0 ${useDefaultData ? 'text-primary' : 'text-muted-foreground'}`} />
+                                        <span className="text-xs font-medium">Use default data</span>
                                     </div>
-                                    <p className="text-xs text-muted-foreground mt-1 ml-6">
-                                        Pre-loaded sample data
-                                    </p>
                                 </button>
-                                
                                 <button
                                     onClick={() => {
                                         setUseDefaultData(false)
                                         fileInputRef.current?.click()
                                     }}
-                                    className={`w-full p-3 rounded-lg border-2 transition-all text-left ${
-                                        !useDefaultData 
-                                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30' 
-                                            : 'border-transparent bg-background hover:bg-muted'
+                                    className={`w-full p-2 rounded-md border transition-all text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                                        !useDefaultData
+                                            ? 'border-primary bg-primary/5 dark:bg-primary/10'
+                                            : 'border-transparent bg-background hover:bg-muted/50'
                                     }`}
                                 >
-                                    <div className="flex items-center gap-2">
-                                        <Upload className={`h-4 w-4 ${!useDefaultData ? 'text-blue-500' : 'text-muted-foreground'}`} />
-                                        <span className="text-sm font-medium">Upload CSV Files</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <Upload className={`h-3.5 w-3.5 shrink-0 ${!useDefaultData ? 'text-primary' : 'text-muted-foreground'}`} />
+                                        <span className="text-xs font-medium truncate">{uploadedFile ? uploadedFile.name : 'Upload ZIP'}</span>
                                     </div>
-                                    <p className="text-xs text-muted-foreground mt-1 ml-6">
-                                        {uploadedFile ? (
-                                            <span className="flex items-center gap-1 text-blue-600">
-                                                <FileText className="h-3 w-3" />
-                                                {uploadedFile.name}
-                                            </span>
-                                        ) : (
-                                            'Select a ZIP file'
-                                        )}
-                                    </p>
                                 </button>
                                 <input
                                     ref={fileInputRef}
@@ -543,83 +807,78 @@ const DataManagement = () => {
                             </div>
                         </div>
 
-                        {/* Default Data Info (only show when using default) */}
-                        <div className={`p-4 bg-muted/50 rounded-lg space-y-2 ${!useDefaultData ? 'opacity-50' : ''}`}>
-                            <p className="text-sm font-medium">Default Data Contains:</p>
-                            <ul className="text-sm text-muted-foreground space-y-1">
-                                <li className="flex items-center gap-2">
-                                    <Users className="h-4 w-4" />
-                                    <span>10,000 Users</span>
-                                </li>
-                                <li className="flex items-center gap-2">
-                                    <CreditCard className="h-4 w-4" />
-                                    <span>~21,000 Accounts</span>
-                                </li>
-                                <li className="flex items-center gap-2">
-                                    <Smartphone className="h-4 w-4" />
-                                    <span>~25,000 Devices</span>
-                                </li>
-                                <li className="flex items-center gap-2">
-                                    <GitBranch className="h-4 w-4" />
-                                    <span>Ownership & Usage relationships</span>
-                                </li>
+                        {/* Default Data Info */}
+                        <div className={`rounded-lg border border-border/80 bg-muted/30 p-3 space-y-1.5 transition-opacity ${!useDefaultData ? 'opacity-50' : ''}`}>
+                            <p className="text-xs font-medium text-foreground">Default data</p>
+                            <ul className="text-xs text-muted-foreground space-y-1">
+                                <li className="flex items-center gap-1.5"><Users className="h-3 w-3 shrink-0" />10k users</li>
+                                <li className="flex items-center gap-1.5"><CreditCard className="h-3 w-3 shrink-0" />~21k accounts</li>
+                                <li className="flex items-center gap-1.5"><Smartphone className="h-3 w-3 shrink-0" />~25k devices</li>
+                                <li className="flex items-center gap-1.5"><GitBranch className="h-3 w-3 shrink-0" />Edges</li>
                             </ul>
                         </div>
 
                         {/* Target Systems */}
-                        <div className="p-4 bg-muted/50 rounded-lg space-y-3">
-                            <p className="text-sm font-medium">Target Systems:</p>
-                            <div className="space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                        <HardDrive className="h-4 w-4 text-blue-500" />
-                                        <Label htmlFor="load-graph" className="text-sm cursor-pointer">
-                                            Aerospike Graph
-                                        </Label>
-                                    </div>
-                                    <Switch 
-                                        id="load-graph" 
-                                        checked={loadGraph} 
-                                        onCheckedChange={setLoadGraph}
-                                    />
+                        <div className="rounded-lg border border-border/80 bg-muted/30 p-3 space-y-2">
+                            <p className="text-xs font-medium text-foreground">Targets</p>
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <Label htmlFor="load-graph" className="text-xs cursor-pointer flex items-center gap-1.5">
+                                        <HardDrive className="h-3 w-3 shrink-0 text-blue-500" />Graph
+                                    </Label>
+                                    <Switch id="load-graph" checked={loadGraph} onCheckedChange={setLoadGraph} className="scale-75 origin-right" />
                                 </div>
-                                <p className="text-xs text-muted-foreground ml-6">
-                                    Loads vertices and edges
-                                </p>
-                                
-                                <div className={`flex items-center justify-between ${!aerospikeStats?.connected ? 'opacity-50' : ''}`}>
-                                    <div className="flex items-center gap-2">
-                                        <Server className={`h-4 w-4 ${aerospikeStats?.connected ? 'text-green-500' : 'text-gray-400'}`} />
-                                        <Label 
-                                            htmlFor="load-aerospike" 
-                                            className={`text-sm ${aerospikeStats?.connected ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground'}`}
-                                        >
-                                            Aerospike KV Store
-                                        </Label>
-                                    </div>
-                                    <Switch 
-                                        id="load-aerospike" 
-                                        checked={aerospikeStats?.connected ? loadAerospike : false}
-                                        onCheckedChange={setLoadAerospike}
-                                        disabled={!aerospikeStats?.connected}
-                                    />
+                                <div className={`flex items-center justify-between gap-2 ${!aerospikeStats?.connected ? 'opacity-50' : ''}`}>
+                                    <Label htmlFor="load-aerospike" className={`text-xs flex items-center gap-1.5 ${aerospikeStats?.connected ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground'}`}>
+                                        <Server className={`h-3 w-3 shrink-0 ${aerospikeStats?.connected ? 'text-green-500' : ''}`} />KV
+                                    </Label>
+                                    <Switch id="load-aerospike" checked={aerospikeStats?.connected ? loadAerospike : false} onCheckedChange={setLoadAerospike} disabled={!aerospikeStats?.connected} className="scale-75 origin-right" />
                                 </div>
-                                <p className="text-xs text-muted-foreground ml-6">
-                                    {aerospikeStats?.connected ? (
-                                        'Loads users for tracking'
-                                    ) : (
-                                        <span className="text-amber-600">
-                                            Not connected - disabled
-                                        </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Storage stats (Graph + KV) + clear */}
+                    <div className="rounded-lg border border-border/80 bg-muted/20 p-2.5 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-3 text-xs">
+                                <span className="font-medium text-foreground">Storage</span>
+                                <span className="text-muted-foreground">
+                                    Graph: <strong>{loadingStats ? '…' : (graphStats?.users?.toLocaleString() ?? '0')}</strong> users, <strong>{loadingStats ? '…' : (graphStats?.transactions?.toLocaleString() ?? '0')}</strong> txns
+                                </span>
+                                <span className="text-muted-foreground">
+                                    KV: <strong>{loadingStats ? '…' : (aerospikeStats?.users_count?.toLocaleString() ?? '0')}</strong> users, <strong>{aerospikeStats?.flagged_accounts_count?.toLocaleString() ?? '0'}</strong> flagged
+                                    {aerospikeStats?.connected && (
+                                        <span className="ml-1 text-muted-foreground/80">(P:{aerospikeStats.pending_review ?? 0} F:{aerospikeStats.confirmed_fraud ?? 0} C:{aerospikeStats.cleared ?? 0})</span>
                                     )}
-                                </p>
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => { fetchGraphStats(); fetchAerospikeStats(); }} disabled={loadingStats}>
+                                    {loadingStats ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/20"
+                                    onClick={handleDeleteAllData}
+                                    disabled={deleteLoading}
+                                >
+                                    {deleteLoading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : confirmDelete ? (
+                                        <><AlertTriangle className="h-3.5 w-3.5 mr-1" />Confirm?</>
+                                    ) : (
+                                        <><Trash2 className="h-3.5 w-3.5 mr-1" />Clear all</>
+                                    )}
+                                </Button>
                             </div>
                         </div>
                     </div>
 
                     {/* Status Display */}
                     {(bulkLoadStatus.message || bulkLoadStatus.status || bulkLoadStatus.graph || bulkLoadStatus.aerospike) && (
-                        <div className={`p-4 rounded-lg flex items-start gap-3 ${
+                        <div className={`p-4 rounded-xl flex items-start gap-3 ${
                             bulkLoadStatus.complete || bulkLoadStatus.success
                                 ? 'bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800' 
                                 : bulkLoadStatus.error 
@@ -705,23 +964,19 @@ const DataManagement = () => {
                     )}
 
                     {/* Warning */}
-                    <div className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg">
-                        <p className="text-sm text-amber-800 dark:text-amber-300 flex items-center gap-2">
-                            <AlertTriangle className="h-4 w-4" />
-                            This will load/reload all sample data. Existing data may be affected.
+                    <div className="rounded-lg border border-amber-200/80 dark:border-amber-800/80 bg-amber-50/80 dark:bg-amber-950/20 px-2.5 py-1.5">
+                        <p className="text-xs text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                            Load/reload will affect existing data.
                         </p>
                     </div>
 
                     {/* Progress Bar */}
                     {isLoading && bulkLoadProgress && (
-                        <div className="p-4 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-lg space-y-2">
-                            <div className="flex justify-between text-sm">
-                                <span className="font-medium text-green-800 dark:text-green-200">
-                                    {bulkLoadProgress.message}
-                                </span>
-                                <span className="text-green-600 dark:text-green-400">
-                                    {bulkLoadProgress.percentage}%
-                                </span>
+                        <div className="p-3 rounded-lg border border-green-200/80 dark:border-green-800/80 bg-green-50/80 dark:bg-green-950/20 space-y-1.5">
+                            <div className="flex justify-between text-xs">
+                                <span className="font-medium text-green-800 dark:text-green-200">{bulkLoadProgress.message}</span>
+                                <span className="text-green-600 dark:text-green-400">{bulkLoadProgress.percentage}%</span>
                             </div>
                             <div className="h-3 bg-green-100 dark:bg-green-900/50 rounded-full overflow-hidden">
                                 <div 
@@ -743,163 +998,96 @@ const DataManagement = () => {
                     )}
 
                     {/* Actions */}
-                    <div className="flex gap-3">
-                        <Button 
-                            onClick={handleBulkLoad} 
+                    <div className="flex gap-2 mt-auto pt-2">
+                        <Button
+                            size="sm"
+                            onClick={handleBulkLoad}
                             disabled={isLoading || (!loadGraph && !(aerospikeStats?.connected && loadAerospike)) || (!useDefaultData && !uploadedFile)}
                             className="flex-1"
                         >
                             {isLoading ? (
-                                <>
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                    {bulkLoadProgress ? `${bulkLoadProgress.percentage}%` : 'Starting...'}
-                                </>
+                                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{bulkLoadProgress ? `${bulkLoadProgress.percentage}%` : 'Starting...'}</>
                             ) : (
-                                <>
-                                    {useDefaultData ? (
-                                        <Play className="h-4 w-4 mr-2" />
-                                    ) : (
-                                        <Upload className="h-4 w-4 mr-2" />
-                                    )}
-                                    {useDefaultData ? 'Start Bulk Load' : 'Upload & Load'}
-                                </>
+                                <>{useDefaultData ? <Play className="h-3.5 w-3.5 mr-1.5" /> : <Upload className="h-3.5 w-3.5 mr-1.5" />}{useDefaultData ? 'Start bulk load' : 'Upload & load'}</>
                             )}
                         </Button>
-                        <Button 
-                            variant="outline" 
-                            onClick={handleCheckStatus}
-                            disabled={loadingStats}
-                        >
-                            {loadingStats ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                                <RefreshCw className="h-4 w-4" />
-                            )}
+                        <Button size="sm" variant="outline" onClick={handleCheckStatus} disabled={loadingStats}>
+                            {loadingStats ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                         </Button>
                     </div>
                 </CardContent>
+                )}
             </Card>
+            </section>
 
-            {/* Historical Transaction Injection */}
-            <Card className="md:col-span-2 border-blue-200 dark:border-blue-800">
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <GitBranch className="h-5 w-5 text-blue-500" />
-                        Inject Historical Transactions
-                        <span className="ml-auto text-xs font-normal text-blue-600 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded">
-                            Step 2: After Bulk Load
-                        </span>
-                    </CardTitle>
-                    <CardDescription>
-                        Generate historical transactions with realistic fraud patterns. Transactions are written to both 
-                        <strong> Graph DB</strong> (for real-time checks) and <strong> KV Store</strong> (for ML feature computation).
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
+            {/* Section: Generate Transactions */}
+            <section className="space-y-3">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                    <span className="text-xs font-semibold uppercase tracking-wider">2</span>
+                    <span className="text-sm">Inject transactions</span>
+                </div>
+                <Card className="overflow-hidden border border-blue-200/60 dark:border-blue-800/60 shadow-sm h-full flex flex-col">
+                    <CardHeader className="pb-2 pt-4 px-4">
+                        <CardTitle className="flex items-center gap-2 text-base">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-500/10">
+                                <GitBranch className="h-4 w-4 text-blue-500" />
+                            </div>
+                            Inject transactions
+                            <Badge variant="secondary" className="ml-auto text-xs font-normal text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800">
+                                After 1
+                            </Badge>
+                        </CardTitle>
+                        <CardDescription className="mt-0.5 text-xs">
+                            Generate historical txns with fraud patterns → Graph DB & KV.
+                        </CardDescription>
+                    </CardHeader>
+                <CardContent className="space-y-3 px-4 pb-4 flex-1 flex flex-col">
                     {/* Parameters */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="txn-count" className="text-sm font-medium flex items-center gap-2">
-                                Total Transactions
-                                <span className="text-xs text-muted-foreground font-normal">(100 - 100,000)</span>
-                            </Label>
-                            <input
-                                id="txn-count"
-                                type="number"
-                                min={100}
-                                max={100000}
-                                value={txnCount}
-                                onChange={(e) => setTxnCount(Number(e.target.value))}
-                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                                How many transactions to create in total
-                            </p>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div className="space-y-1">
+                            <Label htmlFor="txn-count" className="text-xs font-medium">Total txns</Label>
+                            <Input id="txn-count" type="number" min={100} max={100000} value={txnCount} onChange={(e) => setTxnCount(Number(e.target.value))} className="h-8 text-sm" />
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="spread-days" className="text-sm font-medium flex items-center gap-2">
-                                Spread Over Days
-                                <span className="text-xs text-muted-foreground font-normal">(1 - 365)</span>
-                            </Label>
-                            <input
-                                id="spread-days"
-                                type="number"
-                                min={1}
-                                max={365}
-                                value={spreadDays}
-                                onChange={(e) => setSpreadDays(Number(e.target.value))}
-                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                                Should be ≥ cooldown period (default 7 days)
-                            </p>
+                        <div className="space-y-1">
+                            <Label htmlFor="spread-days" className="text-xs font-medium">Spread (days)</Label>
+                            <Input id="spread-days" type="number" min={1} max={365} value={spreadDays} onChange={(e) => setSpreadDays(Number(e.target.value))} className="h-8 text-sm" />
                         </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="fraud-pct" className="text-sm font-medium flex items-center gap-2">
-                                Fraud Percentage
-                                <span className="text-xs text-muted-foreground font-normal">(0 - 50%)</span>
-                            </Label>
-                            <input
-                                id="fraud-pct"
-                                type="number"
-                                min={0}
-                                max={50}
-                                value={fraudPercentage}
-                                onChange={(e) => setFraudPercentage(Number(e.target.value))}
-                                className="w-full px-3 py-2 border rounded-md text-sm bg-white dark:bg-gray-900"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                                % of transactions that are fraudulent
-                            </p>
+                        <div className="space-y-1">
+                            <Label htmlFor="fraud-pct" className="text-xs font-medium">Fraud %</Label>
+                            <Input id="fraud-pct" type="number" min={0} max={50} value={fraudPercentage} onChange={(e) => setFraudPercentage(Number(e.target.value))} className="h-8 text-sm" />
                         </div>
                     </div>
                     
                     {/* Fraud Patterns Explanation */}
-                    <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg border">
-                        <p className="font-medium text-sm mb-3">Fraud Patterns Generated ({fraudPercentage}% = ~{Math.round(txnCount * fraudPercentage / 100)} transactions):</p>
+                    <div className="p-3 rounded-lg border border-border/80 bg-muted/30">
+                        <p className="font-medium text-xs mb-2">Fraud patterns ({fraudPercentage}% ≈ {Math.round(txnCount * fraudPercentage / 100)} txns):</p>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                            <div className="p-2 bg-red-50 dark:bg-red-950/30 rounded border border-red-200 dark:border-red-800">
-                                <p className="font-medium text-red-700 dark:text-red-300">Fraud Rings (40%)</p>
-                                <p className="text-red-600 dark:text-red-400 mt-1">
-                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.4)} txns
-                                </p>
-                                <p className="text-muted-foreground mt-1">
-                                    Tight groups trading among themselves
-                                </p>
+                            <div className="p-3 rounded-lg border border-red-200/80 dark:border-red-800/80 bg-red-50/80 dark:bg-red-950/30">
+                                <p className="font-medium text-red-700 dark:text-red-300">Fraud rings (40%)</p>
+                                <p className="text-red-600 dark:text-red-400 mt-1">~{Math.round(txnCount * fraudPercentage / 100 * 0.4)} txns</p>
+                                <p className="text-muted-foreground mt-1">Tight groups trading among themselves</p>
                             </div>
-                            <div className="p-2 bg-orange-50 dark:bg-orange-950/30 rounded border border-orange-200 dark:border-orange-800">
-                                <p className="font-medium text-orange-700 dark:text-orange-300">Velocity Bursts (25%)</p>
-                                <p className="text-orange-600 dark:text-orange-400 mt-1">
-                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.25)} txns
-                                </p>
-                                <p className="text-muted-foreground mt-1">
-                                    30+ transactions in one day
-                                </p>
+                            <div className="p-3 rounded-lg border border-orange-200/80 dark:border-orange-800/80 bg-orange-50/80 dark:bg-orange-950/30">
+                                <p className="font-medium text-orange-700 dark:text-orange-300">Velocity (25%)</p>
+                                <p className="text-orange-600 dark:text-orange-400 mt-1">~{Math.round(txnCount * fraudPercentage / 100 * 0.25)} txns</p>
+                                <p className="text-muted-foreground mt-1">30+ txns in one day</p>
                             </div>
-                            <div className="p-2 bg-purple-50 dark:bg-purple-950/30 rounded border border-purple-200 dark:border-purple-800">
-                                <p className="font-medium text-purple-700 dark:text-purple-300">High Amounts (20%)</p>
-                                <p className="text-purple-600 dark:text-purple-400 mt-1">
-                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.2)} txns
-                                </p>
-                                <p className="text-muted-foreground mt-1">
-                                    $15,000 - $100,000 outliers
-                                </p>
+                            <div className="p-3 rounded-lg border border-purple-200/80 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/30">
+                                <p className="font-medium text-purple-700 dark:text-purple-300">High amounts (20%)</p>
+                                <p className="text-purple-600 dark:text-purple-400 mt-1">~{Math.round(txnCount * fraudPercentage / 100 * 0.2)} txns</p>
+                                <p className="text-muted-foreground mt-1">$15k–$100k outliers</p>
                             </div>
-                            <div className="p-2 bg-blue-50 dark:bg-blue-950/30 rounded border border-blue-200 dark:border-blue-800">
-                                <p className="font-medium text-blue-700 dark:text-blue-300">New Account (15%)</p>
-                                <p className="text-blue-600 dark:text-blue-400 mt-1">
-                                    ~{Math.round(txnCount * fraudPercentage / 100 * 0.15)} txns
-                                </p>
-                                <p className="text-muted-foreground mt-1">
-                                    Immediate high activity
-                                </p>
+                            <div className="p-3 rounded-lg border border-blue-200/80 dark:border-blue-800/80 bg-blue-50/80 dark:bg-blue-950/30">
+                                <p className="font-medium text-blue-700 dark:text-blue-300">New account (15%)</p>
+                                <p className="text-blue-600 dark:text-blue-400 mt-1">~{Math.round(txnCount * fraudPercentage / 100 * 0.15)} txns</p>
+                                <p className="text-muted-foreground mt-1">Immediate high activity</p>
                             </div>
                         </div>
                     </div>
 
                     {/* Injection Result */}
                     {injectionResult && (
-                        <div className="p-3 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800 rounded-lg">
+                        <div className="p-3 rounded-xl border border-green-200/80 dark:border-green-800/80 bg-green-50/80 dark:bg-green-950/20">
                             <p className="text-sm font-medium text-green-800 dark:text-green-200 flex items-center gap-2">
                                 <CheckCircle className="h-4 w-4" />
                                 Injection Complete!
@@ -927,7 +1115,7 @@ const DataManagement = () => {
 
                     {/* Progress Bar */}
                     {injectionLoading && injectionProgress && (
-                        <div className="p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg space-y-2">
+                        <div className="p-4 rounded-xl border border-blue-200/80 dark:border-blue-800/80 bg-blue-50/80 dark:bg-blue-950/20 space-y-2">
                             <div className="flex justify-between text-sm">
                                 <span className="font-medium text-blue-800 dark:text-blue-200">
                                     {injectionProgress.message}
@@ -955,238 +1143,269 @@ const DataManagement = () => {
                         </div>
                     )}
 
-                    {/* Workflow Guide */}
-                    <div className="p-3 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-                        <p className="text-sm font-medium text-blue-800 dark:text-blue-200 mb-2">Testing Workflow:</p>
-                        <ol className="text-xs text-blue-700 dark:text-blue-300 space-y-1 list-decimal list-inside">
-                            <li><strong>Bulk Load</strong> - Load users, accounts, devices (above section)</li>
-                            <li><strong>Inject Transactions</strong> - Generate historical transactions with fraud patterns (this section)</li>
-                            <li><strong>Run Detection</strong> - Go to Fraud Detection tab → Run Manual Detection</li>
-                            <li><strong>Review Flagged</strong> - Check Flagged Accounts tab for detected fraud</li>
-                        </ol>
-                    </div>
-                    
+                    {/* Workflow Guide
+                    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-200/60 dark:border-blue-800/60 bg-blue-50/50 dark:bg-blue-950/20 p-3 text-xs text-blue-800 dark:text-blue-200">
+                        <span className="font-medium shrink-0">Workflow:</span>
+                        <span>1. Bulk Load</span>
+                        <span className="text-blue-500">→</span>
+                        <span>2. Inject</span>
+                        <span className="text-blue-500">→</span>
+                        <span>3. Compute Features & Run Detection (below)</span>
+                        <span className="text-blue-500">→</span>
+                        <span>4. Review Flagged Accounts tab</span>
+                    </div> */}
+
                     <Button
+                        size="sm"
                         onClick={handleInjectTransactions}
                         disabled={injectionLoading || txnCount < 100}
-                        className="w-full"
+                        className="w-full mt-auto pt-2"
                     >
                         {injectionLoading ? (
-                            <>
-                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                {injectionProgress ? `${injectionProgress.percentage}%` : 'Starting...'}
-                            </>
+                            <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{injectionProgress ? `${injectionProgress.percentage}%` : 'Starting...'}</>
                         ) : (
-                            <>
-                                <Play className="h-4 w-4 mr-2" />
-                                Inject {txnCount.toLocaleString()} Transactions ({fraudPercentage}% Fraud)
-                            </>
+                            <><Play className="h-3.5 w-3.5 mr-1.5" />Inject {txnCount.toLocaleString()} txns ({fraudPercentage}% fraud)</>
                         )}
                     </Button>
                 </CardContent>
             </Card>
+            </section>
+            </div>
 
-            {/* Graph Database Statistics */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <HardDrive className="h-5 w-5 text-blue-500" />
-                        Aerospike Graph
-                    </CardTitle>
-                    <CardDescription>
-                        Graph database for relationships and traversals
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 bg-muted/50 rounded-lg text-center">
-                            <Users className="h-6 w-6 mx-auto mb-2 text-purple-500" />
-                            <p className="text-2xl font-bold">
-                                {loadingStats ? (
-                                    <Loader2 className="h-6 w-6 animate-spin mx-auto" />
-                                ) : (
-                                    graphStats?.users?.toLocaleString() || '0'
-                                )}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Users</p>
-                        </div>
-                        <div className="p-4 bg-muted/50 rounded-lg text-center">
-                            <GitBranch className="h-6 w-6 mx-auto mb-2 text-green-500" />
-                            <p className="text-2xl font-bold">
-                                {loadingStats ? (
-                                    <Loader2 className="h-6 w-6 animate-spin mx-auto" />
-                                ) : (
-                                    graphStats?.transactions?.toLocaleString() || '0'
-                                )}
-                            </p>
-                            <p className="text-sm text-muted-foreground">Transactions</p>
-                        </div>
-                    </div>
-
-                    <div className="pt-4 border-t">
-                        <Button 
-                            variant="outline" 
-                            className="w-full"
-                            onClick={fetchGraphStats}
-                            disabled={loadingStats}
-                        >
-                            {loadingStats ? (
-                                <>
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                    Refreshing...
-                                </>
-                            ) : (
-                                <>
-                                    <RefreshCw className="h-4 w-4 mr-2" />
-                                    Refresh Statistics
-                                </>
-                            )}
-                        </Button>
-                    </div>
-                </CardContent>
-            </Card>
-
-            {/* Aerospike KV Statistics */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <Server className="h-5 w-5 text-green-500" />
-                        Aerospike KV Store
-                        {aerospikeStats?.connected ? (
-                            <span className="ml-auto text-xs font-normal text-green-600 flex items-center gap-1">
-                                <CheckCircle className="h-3 w-3" />
-                                Connected
-                            </span>
-                        ) : (
-                            <span className="ml-auto text-xs font-normal text-amber-600 flex items-center gap-1">
-                                <XCircle className="h-3 w-3" />
-                                Not Available
-                            </span>
-                        )}
-                    </CardTitle>
-                    <CardDescription>
-                        Key-value storage for risk evaluation and workflow
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    {aerospikeStats?.connected ? (
-                        <>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="p-4 bg-muted/50 rounded-lg text-center">
-                                    <Users className="h-6 w-6 mx-auto mb-2 text-purple-500" />
-                                    <p className="text-2xl font-bold">
-                                        {aerospikeStats.users_count?.toLocaleString() || '0'}
+            {/* Section 3 & 4: Features + ML run */}
+            <section className="space-y-4">
+                <div className="space-y-0.5">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">3 & 4</p>
+                    <p className="text-sm font-medium text-foreground">Calculate features & run ML model</p>
+                </div>
+            {aerospikeStats?.connected === false ? (
+                <Card className="overflow-hidden border-0 shadow-sm md:col-span-2">
+                    <CardHeader className="pb-2 pt-4 px-4">
+                        <CardTitle className="flex items-center gap-2 text-base">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted">
+                                <Zap className="h-4 w-4 text-muted-foreground" />
+                            </div>
+                            Run ML detection
+                        </CardTitle>
+                        <CardDescription className="mt-0.5 text-xs">
+                            Requires Aerospike KV for parameters and detection run
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="px-4 pb-4">
+                        <div className="p-4 rounded-lg bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800">
+                            <div className="flex items-start gap-3">
+                                <XCircle className="h-6 w-6 text-red-500 flex-shrink-0 mt-0.5" />
+                                <div>
+                                    <h4 className="text-sm font-medium text-red-800 dark:text-red-300">
+                                        Aerospike KV unavailable
+                                    </h4>
+                                    <p className="text-xs text-red-700 dark:text-red-400 mt-1">
+                                        Connect Aerospike KV to use detection parameters and run ML.
                                     </p>
-                                    <p className="text-sm text-muted-foreground">Users Loaded</p>
-                                </div>
-                                <div className="p-4 bg-muted/50 rounded-lg text-center">
-                                    <AlertTriangle className="h-6 w-6 mx-auto mb-2 text-amber-500" />
-                                    <p className="text-2xl font-bold">
-                                        {aerospikeStats.flagged_accounts_count?.toLocaleString() || '0'}
-                                    </p>
-                                    <p className="text-sm text-muted-foreground">Flagged</p>
+                                    <Button variant="outline" size="sm" className="mt-2" onClick={fetchAerospikeStats}>
+                                        <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                                        Check connection
+                                    </Button>
                                 </div>
                             </div>
-                            
-                            <div className="grid grid-cols-3 gap-2 text-center">
-                                <div className="p-2 bg-amber-50 dark:bg-amber-950/20 rounded">
-                                    <p className="text-lg font-bold text-amber-600">{aerospikeStats.pending_review || 0}</p>
-                                    <p className="text-xs text-muted-foreground">Pending</p>
-                                </div>
-                                <div className="p-2 bg-red-50 dark:bg-red-950/20 rounded">
-                                    <p className="text-lg font-bold text-red-600">{aerospikeStats.confirmed_fraud || 0}</p>
-                                    <p className="text-xs text-muted-foreground">Fraud</p>
-                                </div>
-                                <div className="p-2 bg-green-50 dark:bg-green-950/20 rounded">
-                                    <p className="text-lg font-bold text-green-600">{aerospikeStats.cleared || 0}</p>
-                                    <p className="text-xs text-muted-foreground">Cleared</p>
-                                </div>
-                            </div>
-                        </>
-                    ) : (
-                        <div className="p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg">
-                            <p className="text-sm text-red-800 dark:text-red-300 flex items-center gap-2">
-                                <XCircle className="h-4 w-4" />
-                                Aerospike KV service is not available. Risk evaluation features are disabled.
-                            </p>
                         </div>
-                    )}
+                    </CardContent>
+                </Card>
+            ) : (
+                <>
+                    <div className="grid gap-6 md:grid-cols-2 md:col-span-2">
+                        {/* LEFT: Compute features (Step 1) – equal height */}
+                        <Card className="overflow-hidden border border-purple-200/70 dark:border-purple-800/70 shadow-sm h-full flex flex-col">
+                            <CardHeader className="pb-2 pt-4 px-4 shrink-0">
+                                <CardTitle className="flex items-center gap-2 text-base">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10">
+                                        <TrendingUp className="h-4 w-4 text-purple-500" />
+                                    </div>
+                                    Compute features
+                                    <Badge variant="secondary" className="ml-auto text-xs font-normal text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800">
+                                        Step 1
+                                    </Badge>
+                                </CardTitle>
+                                <CardDescription className="mt-0.5 text-xs">
+                                    Build account and device features from KV for manual ML runs
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent className="px-4 pb-4 flex-1 flex flex-col gap-3 min-h-0">
+                                <div className="flex-1 min-h-0 flex flex-col gap-3">
+                                    <div className="rounded-lg border border-purple-200/60 dark:border-purple-800/60 bg-gradient-to-br from-purple-50/80 to-transparent dark:from-purple-950/30 dark:to-transparent p-3">
+                                        <div className="flex flex-wrap gap-2 mb-1">
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300">15 account</span>
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300">5 device</span>
+                                        </div>
+                                        <p className="text-xs text-purple-700/90 dark:text-purple-400/90 leading-relaxed">Velocity, amounts, recipients, device exposure, lifecycle (from KV over selected window).</p>
+                                    </div>
+                                    {featureResult && (
+                                        <div className="p-2.5 rounded-lg border border-green-200/80 dark:border-green-800/80 bg-green-50/80 dark:bg-green-950/20 flex items-center justify-between gap-2 flex-wrap text-xs">
+                                            <span className="font-medium text-green-800 dark:text-green-200 flex items-center gap-1.5"><CheckCircle className="h-3.5 w-3.5" />Done</span>
+                                            <span className="text-muted-foreground">{featureResult.accounts_processed?.toLocaleString() ?? 0} accounts · {featureResult.devices_processed?.toLocaleString() ?? 0} devices</span>
+                                        </div>
+                                    )}
+                                    {computingFeatures && featureProgress && (
+                                        <div className="p-2.5 rounded-lg border border-purple-200/80 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/20 space-y-1">
+                                            <div className="flex justify-between text-xs"><span className="font-medium text-purple-800 dark:text-purple-200">{featureProgress.message}</span><span className="tabular-nums text-purple-600 dark:text-purple-400">{featureProgress.percentage}%</span></div>
+                                            <div className="h-2 bg-purple-100 dark:bg-purple-900/50 rounded-full overflow-hidden"><div className="h-full bg-purple-500 transition-all duration-300 rounded-full" style={{ width: `${featureProgress.percentage}%` }} /></div>
+                                        </div>
+                                    )}
+                                </div>
+                                <Button size="sm" onClick={handleComputeFeatures} disabled={computingFeatures} className="w-full bg-purple-600 hover:bg-purple-700 text-white shrink-0 mt-auto">
+                                    {computingFeatures ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{featureProgress ? `${featureProgress.percentage}%` : 'Starting…'}</> : <><TrendingUp className="h-3.5 w-3.5 mr-1.5" />Compute features ({detectionConfig.cooldown_days}d window)</>}
+                                </Button>
+                            </CardContent>
+                        </Card>
 
-                    <div className="pt-4 border-t">
-                        <Button 
-                            variant="outline" 
-                            className="w-full"
-                            onClick={fetchAerospikeStats}
-                            disabled={loadingStats}
-                        >
-                            {loadingStats ? (
-                                <>
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                    Refreshing...
-                                </>
+                        {/* RIGHT: Run ML detection (Step 2) – equal height, compact */}
+                        <Card className="overflow-hidden border-0 shadow-sm h-full flex flex-col">
+                            <CardHeader className="pb-2 pt-4 px-4 shrink-0">
+                                <CardTitle className="flex items-center gap-2 text-base">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-500/10">
+                                        <Zap className="h-4 w-4 text-blue-500" />
+                                    </div>
+                                    Run ML detection
+                                    <Badge variant="secondary" className="ml-auto text-xs font-normal text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800">Step 2</Badge>
+                                </CardTitle>
+                                <CardDescription className="mt-0.5 text-xs">Set parameters and run detection to flag accounts</CardDescription>
+                            </CardHeader>
+                            <CardContent className="px-4 pb-4 flex-1 flex flex-col gap-2.5 min-h-0">
+                                {/* Parameters: one compact row */}
+                                <div className="rounded-lg border border-border/80 bg-muted/30 p-2.5 space-y-2 shrink-0">
+                                    <div className="flex flex-wrap items-end gap-3">
+                                        <div className="space-y-0.5">
+                                            <Label className="text-xs font-medium">Cooldown (d)</Label>
+                                            <Input type="number" min={1} max={90} value={detectionConfig.cooldown_days} onChange={(e) => setDetectionConfig(prev => ({ ...prev, cooldown_days: parseInt(e.target.value) || 7 }))} className="h-7 w-14 text-xs" />
+                                        </div>
+                                        <div className="flex-1 min-w-[100px] space-y-0.5">
+                                            <Label className="text-xs font-medium">Risk: {detectionConfig.risk_threshold}</Label>
+                                            <Slider value={[detectionConfig.risk_threshold]} onValueChange={([value]) => setDetectionConfig(prev => ({ ...prev, risk_threshold: value }))} min={0} max={100} step={5} className="w-full" />
+                                        </div>
+                                        <Button size="sm" variant="outline" onClick={handleSaveConfig} disabled={saving} className="h-7 shrink-0">
+                                            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle className="h-3 w-3" />}
+                                        </Button>
+                                    </div>
+                                </div>
+                                {schedulerStatus?.detection_job_running && (
+                                    <div className="p-1.5 rounded-lg bg-blue-50/80 dark:bg-blue-950/20 border border-blue-200/80 flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300 shrink-0">
+                                        <Loader2 className="h-3 w-3 animate-spin shrink-0" />Detection run in progress…
+                                    </div>
+                                )}
+                                <div className="flex items-center justify-between p-2 bg-muted/30 rounded-lg border gap-2 shrink-0">
+                                    <Label className="text-xs font-medium">Skip cooldown</Label>
+                                    <Switch checked={skipCooldown} onCheckedChange={setSkipCooldown} className="scale-75 origin-right" />
+                                </div>
+                                {runningDetection && detectionProgress && (
+                                    <div className="p-2 rounded-lg bg-blue-50/80 dark:bg-blue-950/20 border border-blue-200/80 dark:border-blue-800/80 space-y-1 shrink-0">
+                                        <div className="flex justify-between text-xs"><span className="font-medium text-blue-800 dark:text-blue-200">{detectionProgress.message}</span><span className="tabular-nums text-blue-600 dark:text-blue-400">{detectionProgress.percentage}%</span></div>
+                                        <div className="h-2 bg-blue-100 dark:bg-blue-900/50 rounded-full overflow-hidden"><div className="h-full bg-blue-500 transition-all duration-300 rounded-full" style={{ width: `${detectionProgress.percentage}%` }} /></div>
+                                    </div>
+                                )}
+                                <div className="flex gap-2 mt-auto pt-1 shrink-0">
+                                    <Button size="sm" onClick={handleRunDetection} disabled={runningDetection || schedulerStatus?.detection_job_running} className="flex-1">
+                                        {runningDetection || schedulerStatus?.detection_job_running ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{detectionProgress ? `${detectionProgress.percentage}%` : 'Starting...'}</> : <><Play className="h-3.5 w-3.5 mr-1.5" />Run detection now</>}
+                                    </Button>
+                                    <Button size="sm" variant="outline" onClick={() => { fetchConfig(); fetchHistory(); }}>
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    </Button>
+                                </div>
+                            </CardContent>
+                        </Card>
+                    </div>
+
+                    <Card className="md:col-span-2 overflow-hidden border-0 shadow-sm">
+                        <CardHeader className="pb-2 pt-4 px-4">
+                            <CardTitle className="flex items-center gap-2 text-base">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted">
+                                    <History className="h-4 w-4 text-muted-foreground" />
+                                </div>
+                                Detection history
+                            </CardTitle>
+                            <CardDescription className="mt-0.5 text-xs">Recent detection runs and results</CardDescription>
+                        </CardHeader>
+                        <CardContent className="px-4 pb-4">
+                            {historyLoading ? (
+                                <div className="space-y-2">
+                                    {[...Array(3)].map((_, i) => (
+                                        <Skeleton key={i} className="h-12 w-full" />
+                                    ))}
+                                </div>
+                            ) : detectionHistory.length === 0 ? (
+                                <div className="text-center py-8 text-muted-foreground">
+                                    <History className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                                    <p>No detection jobs have been run yet.</p>
+                                    <p className="text-sm">Click &quot;Run Detection Now&quot; to start the first job.</p>
+                                </div>
                             ) : (
-                                <>
-                                    <RefreshCw className="h-4 w-4 mr-2" />
-                                    Refresh Statistics
-                                </>
+                                <div className="overflow-x-auto rounded-lg border border-border/80">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow>
+                                                <TableHead>Run Time</TableHead>
+                                                <TableHead>Status</TableHead>
+                                                <TableHead className="text-center">
+                                                    <span className="flex items-center justify-center gap-1"><Users className="h-4 w-4" />Users Evaluated</span>
+                                                </TableHead>
+                                                <TableHead className="text-center">
+                                                    <span className="flex items-center justify-center gap-1"><Timer className="h-4 w-4" />Users Skipped</span>
+                                                </TableHead>
+                                                <TableHead className="text-center">
+                                                    <span className="flex items-center justify-center gap-1"><TrendingUp className="h-4 w-4" />Users Flagged</span>
+                                                </TableHead>
+                                                <TableHead className="text-right">Duration</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {detectionHistory.map((job) => (
+                                                <TableRow key={job.job_id}>
+                                                    <TableCell className="font-medium">
+                                                        <div className="flex items-center gap-2">
+                                                            <Calendar className="h-4 w-4 text-muted-foreground" />
+                                                            {formatDateTime(job.start_time)}
+                                                        </div>
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        {job.status === 'completed' ? (
+                                                            <Badge variant="default" className="bg-green-500">
+                                                                <CheckCircle className="h-3 w-3 mr-1" />Completed
+                                                            </Badge>
+                                                        ) : job.status === 'failed' ? (
+                                                            <Badge variant="destructive">
+                                                                <XCircle className="h-3 w-3 mr-1" />Failed
+                                                            </Badge>
+                                                        ) : (
+                                                            <Badge variant="secondary">
+                                                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />Running
+                                                            </Badge>
+                                                        )}
+                                                    </TableCell>
+                                                    <TableCell className="text-center">
+                                                        {(job.users_evaluated ?? job.accounts_evaluated).toLocaleString()}
+                                                    </TableCell>
+                                                    <TableCell className="text-center text-muted-foreground">
+                                                        {job.accounts_skipped_cooldown.toLocaleString()}
+                                                    </TableCell>
+                                                    <TableCell className="text-center">
+                                                        <span className={job.newly_flagged > 0 ? 'text-red-600 font-semibold' : ''}>
+                                                            {job.newly_flagged.toLocaleString()}
+                                                        </span>
+                                                    </TableCell>
+                                                    <TableCell className="text-right text-muted-foreground">
+                                                        {job.duration_seconds ? formatDuration(job.duration_seconds) : '-'}
+                                                    </TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </div>
                             )}
-                        </Button>
-                    </div>
-                </CardContent>
-            </Card>
+                        </CardContent>
+                    </Card>
+                </>
+            )}
+            </section>
 
-            {/* Clear All Data */}
-            <Card className="md:col-span-2 border-red-200 dark:border-red-800">
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-red-600">
-                        <Trash2 className="h-5 w-5" />
-                        Clear All Data
-                        <span className="ml-auto text-xs font-normal text-red-600 bg-red-100 dark:bg-red-900/30 px-2 py-1 rounded">
-                            Danger Zone
-                        </span>
-                    </CardTitle>
-                    <CardDescription>
-                        Delete all data from both Aerospike Graph and KV Store. This action cannot be undone.
-                    </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-lg">
-                        <h4 className="text-sm font-medium text-red-800 dark:text-red-300 mb-2 flex items-center gap-2">
-                            <AlertTriangle className="h-4 w-4" />
-                            This will permanently delete:
-                        </h4>
-                        <ul className="text-sm text-red-700 dark:text-red-400 space-y-1 list-disc list-inside">
-                            <li><strong>Graph DB:</strong> All users, accounts, devices, and transaction edges</li>
-                            <li><strong>KV Store:</strong> All users, transactions, account-facts, device-facts</li>
-                            <li><strong>Flagged Accounts:</strong> All flagged accounts and detection history</li>
-                        </ul>
-                    </div>
-
-                    <Button 
-                        onClick={handleDeleteAllData}
-                        disabled={deleteLoading}
-                        variant="destructive"
-                        className="w-full"
-                    >
-                        {deleteLoading ? (
-                            <>
-                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                Deleting All Data...
-                            </>
-                        ) : confirmDelete ? (
-                            <>
-                                <AlertTriangle className="h-4 w-4 mr-2" />
-                                Click Again to Confirm Delete
-                            </>
-                        ) : (
-                            <>
-                                <Trash2 className="h-4 w-4 mr-2" />
-                                Delete All Data
-                            </>
-                        )}
-                    </Button>
-                </CardContent>
-            </Card>
         </div>
     )
 }
