@@ -235,7 +235,7 @@ def get_users_stats():
 
 @app.get("/users/{user_id}")
 def get_user(user_id: str):
-    """Get user's profile with accounts and devices from KV store"""
+    """Get user's profile with accounts, devices, and transactions from KV store"""
     try:
         user = aerospike_service.get_user(user_id)
         if not user:
@@ -267,6 +267,51 @@ def get_user(user_id: str):
             for dev_id, dev_data in devices_map.items()
         ] if isinstance(devices_map, dict) else []
         
+        # Fetch transactions from Aerospike KV for all user's accounts
+        txns_list = []
+        for acc in accounts_list:
+            acc_id = acc.get('id', '')
+            if acc_id:
+                try:
+                    txns = aerospike_service.get_transactions_for_account(acc_id, days=7)
+                    for txn in txns:
+                        # Only include outgoing transactions to avoid duplicates
+                        if txn.get('direction') != 'out':
+                            continue
+                        
+                        # Get counterparty user info
+                        counterparty_user_id = txn.get('counterparty_user_id', '')
+                        other_party_name = 'Unknown'
+                        other_party_risk = 0
+                        
+                        if counterparty_user_id:
+                            other_user = aerospike_service.get_user(counterparty_user_id)
+                            if other_user:
+                                other_party_name = other_user.get('name', 'Unknown')
+                                other_party_risk = other_user.get('risk_score', 0) or 0
+                        
+                        txns_list.append({
+                            'txn': {
+                                'txn_id': txn.get('txn_id', ''),
+                                'amount': txn.get('amount', 0),
+                                'timestamp': txn.get('timestamp', ''),
+                                'type': txn.get('type', 'transfer'),
+                                'fraud_score': txn.get('fraud_score', 0) or 0,
+                                'status': 'flagged' if txn.get('is_fraud') else 'clean',
+                            },
+                            'other_party': {
+                                'id': counterparty_user_id,
+                                'name': other_party_name,
+                                'risk_score': other_party_risk
+                            }
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to fetch transactions for account {acc_id}: {e}")
+        
+        # Sort by timestamp descending and limit
+        txns_list.sort(key=lambda x: x['txn'].get('timestamp', ''), reverse=True)
+        txns_list = txns_list[:50]  # Limit to 50 most recent
+        
         return {
             "user": {
                 "id": user_id,
@@ -283,6 +328,7 @@ def get_user(user_id: str):
             "risk_level": risk_level,
             "accounts": accounts_list,
             "devices": devices_list,
+            "txns": txns_list,
         }
     except HTTPException:
         raise
@@ -351,14 +397,29 @@ def get_user_transactions(
 
 @app.get("/users/{user_id}/connected-devices")
 def get_user_connected_devices(user_id: str = Path(..., description="User ID")):
-    """Get users who share devices with the specified user (requires graph traversal - not available in KV)"""
+    """Get users who share devices with the specified user"""
     try:
-        # Connected devices requires graph traversal to find shared device relationships
-        # KV store doesn't have this relationship data, returning empty
+        connected_users = []
+        
+        # Use graph service to find users sharing devices
+        if graph_service.client:
+            try:
+                raw_connected = graph_service.get_user_connected_devices(user_id)
+                for conn in raw_connected:
+                    connected_users.append({
+                        "user_id": conn.get('user_id', ''),
+                        "name": conn.get('name', 'Unknown'),
+                        "risk_score": conn.get('risk_score', 0),
+                        "shared_devices": [],  # Could be populated with specific device IDs
+                        "shared_device_count": conn.get('shared_device_count', 0)
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to fetch connected users from graph: {e}")
+        
         return {
             "user_id": user_id,
-            "connected_users": [],
-            "total_connections": 0
+            "connected_users": connected_users,
+            "total_connections": len(connected_users)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get connected device users: {str(e)}")
@@ -812,30 +873,78 @@ def bulk_load_csv_data(
         "message": ""
     }
     
+    # Calculate total steps for progress tracking
+    total_steps = 0
+    if load_graph:
+        total_steps += 3  # Graph: start, load, verify
+    if load_aerospike:
+        total_steps += 3  # KV: start, load users, complete
+    total_steps = max(total_steps, 1)
+    
+    # Start progress tracking
+    progress_service.start_operation("bulk_load", total_steps, "Initializing bulk load...")
+    current_step = 0
+    
     try:
+        # Clear existing transacts.csv before bulk load to prevent loading stale transactions
+        transacts_path = "/data/graph_csv/edges/transactions/transacts.csv"
+        if os.path.exists(transacts_path):
+            os.remove(transacts_path)
+            logger.info("Cleared existing transacts.csv before bulk load")
+        
         # Load to Graph DB
         if load_graph:
+            current_step += 1
+            progress_service.update_progress("bulk_load", current_step, "📊 Graph: Starting bulk load...")
+            
             graph_result = graph_service.bulk_load_csv_data(vertices_path, edges_path)
             result["graph"] = graph_result
             
-            if not graph_result["success"]:
+            current_step += 1
+            if graph_result["success"]:
+                stats = graph_result.get("statistics", {})
+                progress_service.update_progress(
+                    "bulk_load", current_step, 
+                    f"📊 Graph: Loaded {stats.get('users', 0)} users, {stats.get('accounts', 0)} accounts, {stats.get('devices', 0)} devices"
+                )
+            else:
                 result["success"] = False
                 result["message"] = f"Graph load failed: {graph_result.get('error', 'Unknown error')}"
+                progress_service.update_progress("bulk_load", current_step, f"📊 Graph: Failed - {graph_result.get('error', 'Unknown')}")
+            
+            current_step += 1
+            progress_service.update_progress("bulk_load", current_step, "📊 Graph: Load complete")
         
         # Load users to Aerospike KV
         if load_aerospike:
+            current_step += 1
+            progress_service.update_progress("bulk_load", current_step, "🗄️ KV Store: Starting user load...")
+            
             if aerospike_service.is_connected():
                 # Determine the CSV path for users
                 users_csv_path = None
-                if vertices_path:
-                    users_csv_path = f"{vertices_path}/users/users.csv"
+                effective_vertices_path = vertices_path if vertices_path else "/data/graph_csv/vertices"
+                users_csv_path = f"{effective_vertices_path}/users/users.csv"
+                
+                current_step += 1
+                progress_service.update_progress("bulk_load", current_step, "🗄️ KV Store: Loading users, accounts, devices...")
                 
                 aerospike_result = aerospike_service.load_users_from_csv(users_csv_path)
                 result["aerospike"] = aerospike_result
                 
-                if not aerospike_result["success"]:
+                current_step += 1
+                if aerospike_result["success"]:
+                    users = aerospike_result.get('loaded', 0)
+                    accounts = aerospike_result.get('accounts_loaded', 0)
+                    devices = aerospike_result.get('devices_loaded', 0)
+                    progress_service.update_progress(
+                        "bulk_load", current_step, 
+                        f"🗄️ KV Store: Loaded {users} users, {accounts} accounts, {devices} devices"
+                    )
+                else:
                     # Don't fail entire operation, just note the error
                     logger.warning(f"Aerospike load warning: {aerospike_result.get('message', 'Unknown error')}")
+                    progress_service.update_progress("bulk_load", current_step, f"🗄️ KV Store: Warning - {aerospike_result.get('message', '')}")
             else:
                 result["aerospike"] = {
                     "success": False,
@@ -855,16 +964,23 @@ def bulk_load_csv_data(
         
         if load_aerospike and result["aerospike"]:
             if result["aerospike"]["success"]:
-                messages.append(f"Aerospike KV: {result['aerospike'].get('loaded', 0)} users")
+                users = result['aerospike'].get('loaded', 0)
+                accounts = result['aerospike'].get('accounts_loaded', 0)
+                devices = result['aerospike'].get('devices_loaded', 0)
+                messages.append(f"Aerospike KV: {users} users, {accounts} accounts, {devices} devices")
             else:
                 messages.append(f"Aerospike KV: {result['aerospike'].get('message', 'Failed')}")
         
         result["message"] = " | ".join(messages) if messages else "No operations performed"
         
+        # Complete progress tracking
+        progress_service.complete_operation("bulk_load", result["message"])
+        
         return result
         
     except Exception as e:
         logger.error(f"Bulk load failed: {e}")
+        progress_service.fail_operation("bulk_load", str(e), "Bulk load failed")
         raise HTTPException(status_code=500, detail=f"Failed to bulk load data: {str(e)}")
 
 @app.get("/bulk-load-status")
@@ -967,6 +1083,38 @@ def inject_historical_transactions(
     except Exception as e:
         logger.error(f"Transaction injection failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to inject transactions: {str(e)}")
+
+
+@app.post("/inject-transactions-bulk")
+def inject_transactions_bulk(
+    transaction_count: int = Query(10000, ge=100, le=100000, description="Number of transactions to generate"),
+    spread_days: int = Query(30, ge=1, le=365, description="Days to spread transactions over"),
+    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions")
+):
+    """
+    Bulk inject historical transactions using optimized batch operations.
+    
+    This endpoint is significantly faster than /inject-transactions because:
+    1. Pre-fetches all account→user mappings from KV (1 scan vs 2 Graph queries per txn)
+    2. Generates all transactions in memory first
+    3. Writes CSV for Graph native bulk loader (1 bulk load vs N Gremlin queries)
+    4. Batch writes to KV (1 batch vs 2N individual writes)
+    
+    For 10,000 transactions: ~3 DB operations instead of ~50,000.
+    """
+    if not transaction_injector:
+        raise HTTPException(status_code=503, detail="Transaction injector not available. Aerospike may not be connected.")
+    
+    try:
+        result = transaction_injector.inject_transactions_bulk(
+            transaction_count=transaction_count,
+            spread_days=spread_days,
+            fraud_percentage=fraud_percentage
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Bulk transaction injection failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to bulk inject transactions: {str(e)}")
 
 
 @app.post("/compute-features")
@@ -1093,8 +1241,10 @@ async def bulk_load_upload(
         if not file.filename or not file.filename.endswith('.zip'):
             raise HTTPException(status_code=400, detail="File must be a ZIP archive")
         
-        # Create temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="bulk_load_")
+        # Create temporary directory in shared volume so Graph service can access files
+        upload_dir = "/data/uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="bulk_load_", dir=upload_dir)
         zip_path = os.path.join(temp_dir, "upload.zip")
         extract_dir = os.path.join(temp_dir, "extracted")
         
@@ -1167,7 +1317,10 @@ async def bulk_load_upload(
         
         if load_aerospike and result["aerospike"]:
             if result["aerospike"]["success"]:
-                messages.append(f"Aerospike KV: {result['aerospike'].get('loaded', 0)} users")
+                users = result['aerospike'].get('loaded', 0)
+                accounts = result['aerospike'].get('accounts_loaded', 0)
+                devices = result['aerospike'].get('devices_loaded', 0)
+                messages.append(f"Aerospike KV: {users} users, {accounts} accounts, {devices} devices")
             else:
                 messages.append(f"Aerospike KV: {result['aerospike'].get('message', 'Failed')}")
         

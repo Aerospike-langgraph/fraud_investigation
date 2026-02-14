@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 import os
+import re
 import time
 from typing import List, Dict, Any
 
@@ -1252,7 +1253,14 @@ class GraphService:
     # ----------------------------------------------------------------------------------------------------------
 
     def bulk_load_csv_data(self, vertices_path: str = None, edges_path: str = None) -> Dict[str, Any]:
-        """Bulk load data from CSV files using Aerospike Graph bulk loader"""
+        """Bulk load data from CSV files using Aerospike Graph bulk loader.
+        
+        Note: Aerospike Graph bulk loader REQUIRES vertices path - it's not optional.
+        
+        Args:
+            vertices_path: Path to vertices CSV directory (required by bulk loader)
+            edges_path: Path to edges CSV directory
+        """
         try:
             if not self.client:
                 raise Exception("Graph client not available. Cannot bulk load data without graph database connection.")
@@ -1263,24 +1271,77 @@ class GraphService:
             if not edges_path:
                 edges_path = "/data/graph_csv/edges"
             
-            logger.info(f"Starting bulk load with vertices path: {vertices_path}, edges path: {edges_path}")
+            logger.info(f"🚀 bulk_load_csv_data called:")
+            logger.info(f"   vertices_path: {vertices_path}")
+            logger.info(f"   edges_path: {edges_path}")
+            
+            # Check what files exist in the edges path (os imported at module level)
+            if edges_path and os.path.exists(edges_path):
+                logger.info(f"📂 Checking edges directory: {edges_path}")
+                if os.path.isdir(edges_path):
+                    for root, dirs, files in os.walk(edges_path):
+                        for f in files:
+                            file_path = os.path.join(root, f)
+                            file_size = os.path.getsize(file_path)
+                            logger.info(f"   Found: {file_path} ({file_size} bytes)")
+                            # Read first 2 lines of CSV files
+                            if f.endswith('.csv'):
+                                try:
+                                    with open(file_path, 'r') as csvf:
+                                        lines = csvf.readlines()[:3]
+                                        logger.info(f"      Header: {lines[0].strip() if lines else 'EMPTY'}")
+                                        if len(lines) > 1:
+                                            logger.info(f"      Row 1: {lines[1].strip()}")
+                                        logger.info(f"      Total lines: {len(open(file_path).readlines())}")
+                                except Exception as read_e:
+                                    logger.warning(f"      Could not read file: {read_e}")
+                else:
+                    logger.info(f"   Path is a file: {edges_path}")
+            else:
+                logger.warning(f"⚠️ Edges path does not exist: {edges_path}")
             
             bulk_load_result = {}
             try:
                 # Execute bulk load using Aerospike Graph loader
-                logger.info("Starting bulk load operation...")
-                bulk_load_result["result"] = (self.client
-                            .with_("evaluationTimeout", 2000000)
-                            .call("aerospike.graphloader.admin.bulk-load.load")
-                            .with_("aerospike.graphloader.vertices", vertices_path)
-                            .with_("aerospike.graphloader.edges", edges_path)
-                            .next())
+                # Note: Both vertices and edges paths are REQUIRED by Aerospike Graph bulk loader
+                logger.info("   Executing bulk load Gremlin call...")
                 
-                logger.info("Bulk load operation started successfully")
+                bulk_load_result["result"] = (self.client
+                    .with_("evaluationTimeout", 2000000)
+                    .call("aerospike.graphloader.admin.bulk-load.load")
+                    .with_("aerospike.graphloader.vertices", vertices_path)
+                    .with_("aerospike.graphloader.edges", edges_path)
+                    .next())
+                
+                logger.info(f"   Bulk load Gremlin call returned: {bulk_load_result['result']}")
                 bulk_load_result["success"] = True
+                
+                # Poll for bulk load status (time imported at module level)
+                max_polls = 30
+                for i in range(max_polls):
+                    try:
+                        status = self.client.call("aerospike.graphloader.admin.bulk-load.status").next()
+                        logger.info(f"   Bulk load status (poll {i+1}): {status}")
+                        status_str = str(status)
+                        if "complete=true" in status_str or "step=done" in status_str:
+                            logger.info(f"✅ Bulk load completed!")
+                            if "bad-edges=" in status_str:
+                                # Extract bad-edges count (re imported at module level)
+                                match = re.search(r'bad-edges=(\d+)', status_str)
+                                if match:
+                                    bad_edges = int(match.group(1))
+                                    if bad_edges > 0:
+                                        logger.warning(f"⚠️ Bulk load had {bad_edges} bad edges!")
+                            break
+                        time.sleep(1)
+                    except Exception as status_e:
+                        logger.warning(f"   Could not get status: {status_e}")
+                        break
 
             except Exception as e:
-                logger.error(f"Bulk load failed: {e}")
+                logger.error(f"❌ Bulk load Gremlin call failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 bulk_load_result["success"] = False 
                 bulk_load_result["error"] = str(e)
                       

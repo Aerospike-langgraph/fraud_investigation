@@ -6,19 +6,30 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ExternalLink, Smartphone, User, Users } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 
+// Helper to get ID from various formats (Graph DB uses "1", KV uses "id")
+const getId = (obj: any): string => obj?.id || obj?.user_id || obj?.['1'] || ''
+
 interface ConnectedDeviceUser {
-    "1": string
+    "1"?: string
+    id?: string
+    user_id?: string
     name: string
-    email: string
+    email?: string
     risk_score: number
-    shared_devices: Device[]
-    shared_device_count: number
+    shared_devices?: Device[]
+    shared_device_count?: number
 }
 
 export interface Connection {
-    device_id: string
-    users: ConnectedDeviceUser[]
+    device_id?: string
+    user_id?: string
+    users?: ConnectedDeviceUser[]
+    name?: string
+    risk_score?: number
+    shared_devices?: string[]
+    shared_device_count?: number
 }
+
 interface Props {
     devices?: Device[],
     connections?: Connection[]
@@ -28,7 +39,7 @@ interface ConnectedUsers {
     [id: string]: {
         user: {
             name: string
-            email: string
+            email?: string
             risk_score: number
         }
         devices: Device[]
@@ -37,13 +48,38 @@ interface ConnectedUsers {
 
 const Connections = ({ devices, connections }: Props) => {
     const connectedUsers: ConnectedUsers = {}
-    if(connections && devices) {
-        for(let { device_id, users } of connections) {
-            const device = devices.find(device => device["1"] === device_id)
-            if(!device) continue
-            for(let user of users) {
-                if(!connectedUsers[user["1"]]) connectedUsers[user["1"]] = { user, devices: [ device ] }
-                else connectedUsers[user["1"]].devices.push(device)
+    
+    if(connections && connections.length > 0) {
+        // Handle new format from /connected-devices endpoint (flat list of connected users)
+        if (connections[0].user_id || connections[0].name) {
+            // New KV format: each connection is a user with user_id, name, risk_score
+            for (const conn of connections) {
+                const userId = conn.user_id || getId(conn)
+                if (userId) {
+                    connectedUsers[userId] = {
+                        user: {
+                            name: conn.name || 'Unknown',
+                            risk_score: conn.risk_score || 0
+                        },
+                        devices: [] // Devices info not available in new format
+                    }
+                }
+            }
+        } else if (devices) {
+            // Old Graph format: connections have device_id and users array
+            for(const { device_id, users } of connections) {
+                if (!device_id || !users) continue
+                const device = devices.find(d => getId(d) === device_id)
+                if(!device) continue
+                for(const user of users) {
+                    const userId = getId(user)
+                    if(!userId) continue
+                    if(!connectedUsers[userId]) {
+                        connectedUsers[userId] = { user, devices: [ device ] }
+                    } else {
+                        connectedUsers[userId].devices.push(device)
+                    }
+                }
             }
         }
     }
@@ -86,13 +122,15 @@ const Connections = ({ devices, connections }: Props) => {
                                                             {connectedUsers[userId].user.name}
                                                         </p>
                                                         <Badge 
-                                                            variant={connectedUsers[userId].user.risk_score > 50 ? 'destructive' : connectedUsers[userId].user.risk_score > 25 ? 'default' : 'secondary'}
+                                                            variant={(connectedUsers[userId].user.risk_score || 0) > 50 ? 'destructive' : (connectedUsers[userId].user.risk_score || 0) > 25 ? 'default' : 'secondary'}
                                                             className="text-xs"
                                                         >
-                                                            Risk: {connectedUsers[userId].user.risk_score.toFixed(1)}
+                                                            Risk: {(connectedUsers[userId].user.risk_score || 0).toFixed(1)}
                                                         </Badge>
                                                     </div>
-                                                    <p className="text-sm text-muted-foreground">{connectedUsers[userId].user.email}</p>
+                                                    {connectedUsers[userId].user.email && (
+                                                        <p className="text-sm text-muted-foreground">{connectedUsers[userId].user.email}</p>
+                                                    )}
                                                     <p className="text-xs text-muted-foreground">ID: {userId}</p>
                                                 </div>
                                             </div>
@@ -101,6 +139,7 @@ const Connections = ({ devices, connections }: Props) => {
                                                 <span className="text-sm text-muted-foreground">View Profile</span>
                                             </div>
                                         </div>
+                                        {connectedUsers[userId].devices.length > 0 && (
                                         <div className="border-t pt-3">
                                             <div className="flex items-center gap-2 mb-3">
                                                 <Smartphone className="h-4 w-4 text-muted-foreground" />
@@ -109,20 +148,23 @@ const Connections = ({ devices, connections }: Props) => {
                                                 </p>
                                             </div>
                                             <div className="space-y-2">
-                                            {connectedUsers[userId].devices.map((device) => (
-                                                <div key={device['1']} className="flex items-center gap-2 p-2 bg-muted/50 rounded-md border">
+                                            {connectedUsers[userId].devices.map((device) => {
+                                                const deviceId = getId(device)
+                                                return (
+                                                <div key={deviceId} className="flex items-center gap-2 p-2 bg-muted/50 rounded-md border">
                                                     {getDeviceIcon(device.type)}
                                                     <div className="flex-1 min-w-0">
                                                         <p className="text-sm font-medium truncate">{device.type} - {device.os}</p>
-                                                        <p className="text-xs text-muted-foreground truncate">{device.browser}</p>
+                                                        {device.browser && <p className="text-xs text-muted-foreground truncate">{device.browser}</p>}
                                                     </div>
                                                     <Badge variant="secondary" className="text-xs shrink-0">
-                                                    {device['1']}
+                                                        {deviceId}
                                                     </Badge>
                                                 </div>
-                                            ))}
+                                            )})}
                                             </div>
                                         </div>
+                                        )}
                                     </div>
                                 </Card>
                             ))}

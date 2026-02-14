@@ -13,9 +13,13 @@ Features:
   - New account fraud: Immediate high activity after creation
 """
 
+import csv
 import logging
+import os
 import random
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Set, Tuple, Optional
 from collections import defaultdict
@@ -42,6 +46,10 @@ class TransactionInjector:
         self._current_progress = 0
         self._total_items = 0
         
+        # Thread safety for parallel transaction processing
+        self._balance_locks = {}  # Per-account locks for balance updates
+        self._lock_manager = threading.Lock()  # Lock for managing per-account locks
+        
         # Transaction locations
         self.locations = [
             'New York, NY', 'Los Angeles, CA', 'Chicago, IL', 'Houston, TX',
@@ -64,6 +72,445 @@ class TransactionInjector:
             'amount_anomaly_count': 20,      # High-value outlier transactions
             'new_account_fraud_count': 5,    # New accounts with immediate activity
         }
+    
+    def _get_account_lock(self, account_id: str) -> threading.Lock:
+        """
+        Get or create a lock for an account (thread-safe).
+        Used to prevent race conditions during parallel balance updates.
+        """
+        with self._lock_manager:
+            if account_id not in self._balance_locks:
+                self._balance_locks[account_id] = threading.Lock()
+            return self._balance_locks[account_id]
+    
+    def _process_single_transaction(self, txn: dict, account_to_user: dict) -> dict:
+        """
+        Process a single transaction: create Graph edge + update balances.
+        Thread-safe for parallel execution.
+        
+        Args:
+            txn: Transaction data dict with sender_account_id, receiver_account_id, amount, etc.
+            account_to_user: Mapping of account_id to user_id
+            
+        Returns:
+            dict with success status and txn_id
+        """
+        sender = txn['sender_account_id']
+        receiver = txn['receiver_account_id']
+        amount = txn['amount']
+        
+        try:
+            # 1. Create edge in Graph
+            self.graph.client.V(sender) \
+                .addE("TRANSACTS") \
+                .to(__.V(receiver)) \
+                .property("txn_id", txn.get('txn_id', '')) \
+                .property("amount", txn.get('amount', 0)) \
+                .property("currency", txn.get('currency', 'USD')) \
+                .property("type", txn.get('type', 'transfer')) \
+                .property("method", txn.get('method', 'electronic_transfer')) \
+                .property("location", txn.get('location', '')) \
+                .property("timestamp", txn.get('timestamp', '')) \
+                .property("status", txn.get('status', 'completed')) \
+                .property("gen_type", txn.get('gen_type', 'HISTORICAL')) \
+                .property("device_id", txn.get('device_id', '')) \
+                .iterate()
+            
+            # 2. Update balances with per-account locks (sorted order to prevent deadlock)
+            accounts_sorted = sorted([sender, receiver])
+            lock1 = self._get_account_lock(accounts_sorted[0])
+            lock2 = self._get_account_lock(accounts_sorted[1])
+            
+            with lock1:
+                with lock2:
+                    sender_user = account_to_user.get(sender)
+                    receiver_user = account_to_user.get(receiver)
+                    
+                    if sender_user:
+                        try:
+                            self.kv.update_account_balance(sender_user, sender, -amount)
+                        except ValueError as e:
+                            logger.debug(f"Could not update sender balance: {e}")
+                    
+                    if receiver_user:
+                        try:
+                            self.kv.update_account_balance(receiver_user, receiver, +amount)
+                        except ValueError as e:
+                            logger.debug(f"Could not update receiver balance: {e}")
+            
+            return {"success": True, "txn_id": txn['txn_id']}
+            
+        except Exception as e:
+            return {"success": False, "txn_id": txn.get('txn_id'), "error": str(e)}
+    
+    # ==================================================================================
+    # Bulk Fraud Pattern Generation Methods (for parallel processing)
+    # ==================================================================================
+    
+    def _generate_bulk_fraud_rings(
+        self,
+        accounts: List[str],
+        target_count: int,
+        spread_days: int,
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate fraud ring transactions for bulk processing.
+        Returns list of {'graph': {...}, 'kv': [{...}, {...}]} dicts.
+        """
+        transactions = []
+        ring_count = self.fraud_config['fraud_ring_count']
+        ring_size = min(self.fraud_config['fraud_ring_size'], len(accounts) // ring_count)
+        txns_per_ring = target_count // max(1, ring_count)
+        
+        for ring_idx in range(ring_count):
+            # Select accounts for this ring
+            ring_accounts = random.sample(accounts, ring_size)
+            
+            for _ in range(txns_per_ring):
+                # Transactions within the ring (circular pattern)
+                sender = random.choice(ring_accounts)
+                receiver = random.choice([a for a in ring_accounts if a != sender])
+                
+                amount = random.uniform(2000, 15000)
+                timestamp = self._generate_timestamp(spread_days)
+                txn_id = str(uuid.uuid4())
+                location = random.choice(self.locations)
+                txn_type = random.choice(self.txn_types)
+                
+                sender_user = account_to_user.get(sender, '')
+                receiver_user = account_to_user.get(receiver, '')
+                device_id = ''
+                if sender_user and sender_user in user_to_devices:
+                    devices = user_to_devices[sender_user]
+                    if devices:
+                        device_id = random.choice(devices)
+                
+                transactions.append({
+                    'graph': {
+                        'sender_account_id': sender,
+                        'receiver_account_id': receiver,
+                        'txn_id': txn_id,
+                        'amount': round(amount, 2),
+                        'currency': 'USD',
+                        'type': txn_type,
+                        'method': 'electronic_transfer',
+                        'location': location,
+                        'timestamp': timestamp,
+                        'status': 'completed',
+                        'gen_type': 'FRAUD_RING',
+                        'device_id': device_id,
+                    },
+                    'kv': [
+                        {
+                            'account_id': sender,
+                            'direction': 'out',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': receiver,
+                            'user_id': sender_user,
+                            'counterparty_user_id': receiver_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                        {
+                            'account_id': receiver,
+                            'direction': 'in',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': sender,
+                            'user_id': receiver_user,
+                            'counterparty_user_id': sender_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                    ]
+                })
+        
+        logger.info(f"Generated {len(transactions)} fraud ring transactions")
+        return transactions
+    
+    def _generate_bulk_velocity_anomalies(
+        self,
+        accounts: List[str],
+        target_count: int,
+        spread_days: int,
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate velocity anomaly transactions (burst activity) for bulk processing.
+        """
+        transactions = []
+        anomaly_count = self.fraud_config['velocity_anomaly_count']
+        burst_size = target_count // max(1, anomaly_count)
+        
+        anomaly_accounts = random.sample(accounts, min(anomaly_count, len(accounts) // 2))
+        
+        for anomaly_account in anomaly_accounts:
+            burst_day = random.randint(1, max(1, spread_days - 1))
+            
+            for _ in range(burst_size):
+                receiver = random.choice([a for a in accounts if a != anomaly_account])
+                amount = random.uniform(100, 2000)  # Small rapid transfers
+                
+                dt = datetime.now() - timedelta(days=burst_day, hours=random.randint(0, 23), minutes=random.randint(0, 59))
+                timestamp = dt.isoformat()
+                txn_id = str(uuid.uuid4())
+                location = random.choice(self.locations)
+                txn_type = 'transfer'
+                
+                sender_user = account_to_user.get(anomaly_account, '')
+                receiver_user = account_to_user.get(receiver, '')
+                device_id = ''
+                if sender_user and sender_user in user_to_devices:
+                    devices = user_to_devices[sender_user]
+                    if devices:
+                        device_id = random.choice(devices)
+                
+                transactions.append({
+                    'graph': {
+                        'sender_account_id': anomaly_account,
+                        'receiver_account_id': receiver,
+                        'txn_id': txn_id,
+                        'amount': round(amount, 2),
+                        'currency': 'USD',
+                        'type': txn_type,
+                        'method': 'electronic_transfer',
+                        'location': location,
+                        'timestamp': timestamp,
+                        'status': 'completed',
+                        'gen_type': 'VELOCITY_ANOMALY',
+                        'device_id': device_id,
+                    },
+                    'kv': [
+                        {
+                            'account_id': anomaly_account,
+                            'direction': 'out',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': receiver,
+                            'user_id': sender_user,
+                            'counterparty_user_id': receiver_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                        {
+                            'account_id': receiver,
+                            'direction': 'in',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': anomaly_account,
+                            'user_id': receiver_user,
+                            'counterparty_user_id': sender_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                    ]
+                })
+        
+        logger.info(f"Generated {len(transactions)} velocity anomaly transactions")
+        return transactions
+    
+    def _generate_bulk_amount_anomalies(
+        self,
+        accounts: List[str],
+        target_count: int,
+        spread_days: int,
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate amount anomaly transactions (high-value outliers) for bulk processing.
+        """
+        transactions = []
+        
+        for _ in range(target_count):
+            sender, receiver = random.sample(accounts, 2)
+            
+            # High-value amounts
+            amount = random.choice([
+                random.uniform(15000, 50000),
+                random.uniform(50000, 100000),
+                random.uniform(10000, 15000),
+            ])
+            
+            timestamp = self._generate_timestamp(spread_days)
+            txn_id = str(uuid.uuid4())
+            location = random.choice(self.locations)
+            txn_type = 'transfer'
+            
+            sender_user = account_to_user.get(sender, '')
+            receiver_user = account_to_user.get(receiver, '')
+            device_id = ''
+            if sender_user and sender_user in user_to_devices:
+                devices = user_to_devices[sender_user]
+                if devices:
+                    device_id = random.choice(devices)
+            
+            transactions.append({
+                'graph': {
+                    'sender_account_id': sender,
+                    'receiver_account_id': receiver,
+                    'txn_id': txn_id,
+                    'amount': round(amount, 2),
+                    'currency': 'USD',
+                    'type': txn_type,
+                    'method': 'electronic_transfer',
+                    'location': location,
+                    'timestamp': timestamp,
+                    'status': 'completed',
+                    'gen_type': 'AMOUNT_ANOMALY',
+                    'device_id': device_id,
+                },
+                'kv': [
+                    {
+                        'account_id': sender,
+                        'direction': 'out',
+                        'txn_id': txn_id,
+                        'amount': round(amount, 2),
+                        'type': txn_type,
+                        'method': 'electronic_transfer',
+                        'location': location,
+                        'timestamp': timestamp,
+                        'status': 'completed',
+                        'counterparty': receiver,
+                        'user_id': sender_user,
+                        'counterparty_user_id': receiver_user,
+                        'device_id': device_id,
+                        'is_fraud': False,
+                    },
+                    {
+                        'account_id': receiver,
+                        'direction': 'in',
+                        'txn_id': txn_id,
+                        'amount': round(amount, 2),
+                        'type': txn_type,
+                        'method': 'electronic_transfer',
+                        'location': location,
+                        'timestamp': timestamp,
+                        'status': 'completed',
+                        'counterparty': sender,
+                        'user_id': receiver_user,
+                        'counterparty_user_id': sender_user,
+                        'device_id': device_id,
+                        'is_fraud': False,
+                    },
+                ]
+            })
+        
+        logger.info(f"Generated {len(transactions)} amount anomaly transactions")
+        return transactions
+    
+    def _generate_bulk_new_account_fraud(
+        self,
+        accounts: List[str],
+        target_count: int,
+        spread_days: int,
+        account_to_user: Dict[str, str],
+        user_to_devices: Dict[str, List[str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate new account fraud transactions (immediate activity) for bulk processing.
+        """
+        transactions = []
+        
+        new_account_candidates = accounts[:min(20, len(accounts))]
+        txns_per_account = target_count // max(1, len(new_account_candidates))
+        
+        for new_account in new_account_candidates[:self.fraud_config['new_account_fraud_count']]:
+            for _ in range(txns_per_account):
+                receiver = random.choice([a for a in accounts if a != new_account])
+                amount = random.uniform(500, 8000)
+                
+                dt = datetime.now() - timedelta(days=random.randint(0, 2), hours=random.randint(0, 23))
+                timestamp = dt.isoformat()
+                txn_id = str(uuid.uuid4())
+                location = random.choice(self.locations)
+                txn_type = 'transfer'
+                
+                sender_user = account_to_user.get(new_account, '')
+                receiver_user = account_to_user.get(receiver, '')
+                device_id = ''
+                if sender_user and sender_user in user_to_devices:
+                    devices = user_to_devices[sender_user]
+                    if devices:
+                        device_id = random.choice(devices)
+                
+                transactions.append({
+                    'graph': {
+                        'sender_account_id': new_account,
+                        'receiver_account_id': receiver,
+                        'txn_id': txn_id,
+                        'amount': round(amount, 2),
+                        'currency': 'USD',
+                        'type': txn_type,
+                        'method': 'electronic_transfer',
+                        'location': location,
+                        'timestamp': timestamp,
+                        'status': 'completed',
+                        'gen_type': 'NEW_ACCOUNT_FRAUD',
+                        'device_id': device_id,
+                    },
+                    'kv': [
+                        {
+                            'account_id': new_account,
+                            'direction': 'out',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': receiver,
+                            'user_id': sender_user,
+                            'counterparty_user_id': receiver_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                        {
+                            'account_id': receiver,
+                            'direction': 'in',
+                            'txn_id': txn_id,
+                            'amount': round(amount, 2),
+                            'type': txn_type,
+                            'method': 'electronic_transfer',
+                            'location': location,
+                            'timestamp': timestamp,
+                            'status': 'completed',
+                            'counterparty': new_account,
+                            'user_id': receiver_user,
+                            'counterparty_user_id': sender_user,
+                            'device_id': device_id,
+                            'is_fraud': False,
+                        },
+                    ]
+                })
+        
+        logger.info(f"Generated {len(transactions)} new account fraud transactions")
+        return transactions
     
     def inject_historical_transactions(
         self,
@@ -177,6 +624,319 @@ class TransactionInjector:
         
         return result
     
+    def inject_transactions_bulk(
+        self,
+        transaction_count: int = 10000,
+        spread_days: int = 30,
+        fraud_percentage: float = 0.15
+    ) -> Dict[str, Any]:
+        """
+        Bulk inject transactions using CSV + native bulk loader for Graph,
+        and batch writes for KV store.
+        
+        This is significantly faster than inject_historical_transactions because:
+        1. Pre-fetches all account→user mappings (1 KV scan vs 2 Graph queries per txn)
+        2. Generates all transactions in memory first
+        3. Writes CSV for Graph native bulk loader (1 bulk load vs N Gremlin queries)
+        4. Batch writes to KV (1 batch vs 2N individual writes)
+        
+        Args:
+            transaction_count: Total number of transactions to generate
+            spread_days: Days to spread transactions over
+            fraud_percentage: Percentage of fraudulent transactions (default 15%)
+            
+        Returns:
+            Result dict with counts and details
+        """
+        start_time = datetime.now()
+        
+        # Initialize progress tracking
+        self._current_progress = 0
+        self._total_items = transaction_count
+        progress_service.start_operation(
+            self.OPERATION_ID, 
+            5,  # 5 stages: prefetch, generate, write csv, graph bulk, kv batch
+            "Initializing bulk transaction injection..."
+        )
+        
+        result = {
+            "job_id": f"bulk_inject_{start_time.strftime('%Y%m%d_%H%M%S')}",
+            "start_time": start_time.isoformat(),
+            "config": {
+                "transaction_count": transaction_count,
+                "spread_days": spread_days,
+                "fraud_percentage": fraud_percentage,
+            },
+            "normal_transactions": 0,
+            "fraud_transactions": 0,
+            "graph_bulk_load": None,
+            "kv_batch_write": None,
+            "csv_path": None,
+            "errors": [],
+            "status": "running"
+        }
+        
+        try:
+            # Stage 1: Pre-fetch all mappings from KV
+            progress_service.update_progress(self.OPERATION_ID, 0, "Pre-fetching account→user mappings...")
+            account_to_user = self._prefetch_account_user_mappings()
+            user_to_devices = self._prefetch_user_devices()
+            progress_service.update_progress(self.OPERATION_ID, 1, f"Fetched {len(account_to_user)} mappings")
+            
+            # Get all accounts from KV store (required for transaction generation)
+            accounts = self._get_all_accounts_from_kv()
+            if len(accounts) < 10:
+                raise Exception(f"Not enough accounts ({len(accounts)}). Need at least 10.")
+            
+            logger.info(f"Generating {transaction_count} bulk transactions over {spread_days} days "
+                       f"with {fraud_percentage*100:.0f}% fraud rate")
+            
+            # Stage 2: Generate ALL transactions in memory
+            progress_service.update_progress(self.OPERATION_ID, 1, "Generating transactions in memory...")
+            
+            # Calculate counts
+            fraud_txn_count = int(transaction_count * fraud_percentage)
+            normal_txn_count = transaction_count - fraud_txn_count
+            
+            # Data structures for bulk operations
+            graph_transactions = []  # For CSV/Graph bulk loader
+            kv_transactions = []     # For KV batch write
+            
+            # Generate normal transactions
+            for i in range(normal_txn_count):
+                sender, receiver = random.sample(accounts, 2)
+                amount = random.uniform(50, 5000)
+                timestamp = self._generate_timestamp(spread_days)
+                txn_id = str(uuid.uuid4())
+                location = random.choice(self.locations)
+                txn_type = random.choice(self.txn_types)
+                
+                sender_user = account_to_user.get(sender, '')
+                receiver_user = account_to_user.get(receiver, '')
+                device_id = ''
+                if sender_user and sender_user in user_to_devices:
+                    devices = user_to_devices[sender_user]
+                    if devices:
+                        device_id = random.choice(devices)
+                
+                # For Graph CSV
+                graph_transactions.append({
+                    'sender_account_id': sender,
+                    'receiver_account_id': receiver,
+                    'txn_id': txn_id,
+                    'amount': round(amount, 2),
+                    'currency': 'USD',
+                    'type': txn_type,
+                    'method': 'electronic_transfer',
+                    'location': location,
+                    'timestamp': timestamp,
+                    'status': 'completed',
+                    'gen_type': 'HISTORICAL',
+                    'device_id': device_id,
+                })
+                
+                # For KV (sender outgoing)
+                kv_transactions.append({
+                    'account_id': sender,
+                    'direction': 'out',
+                    'txn_id': txn_id,
+                    'amount': round(amount, 2),
+                    'type': txn_type,
+                    'method': 'electronic_transfer',
+                    'location': location,
+                    'timestamp': timestamp,
+                    'status': 'completed',
+                    'counterparty': receiver,
+                    'user_id': sender_user,
+                    'counterparty_user_id': receiver_user,
+                    'device_id': device_id,
+                    'is_fraud': False,
+                })
+                
+                # For KV (receiver incoming)
+                kv_transactions.append({
+                    'account_id': receiver,
+                    'direction': 'in',
+                    'txn_id': txn_id,
+                    'amount': round(amount, 2),
+                    'type': txn_type,
+                    'method': 'electronic_transfer',
+                    'location': location,
+                    'timestamp': timestamp,
+                    'status': 'completed',
+                    'counterparty': sender,
+                    'user_id': receiver_user,
+                    'counterparty_user_id': sender_user,
+                    'device_id': device_id,
+                    'is_fraud': False,
+                })
+            
+            result["normal_transactions"] = normal_txn_count
+            
+            # Generate fraud transactions with sophisticated patterns
+            # Distribution: 30% rings, 25% velocity, 30% amount, 15% new account
+            ring_txns = int(fraud_txn_count * 0.30)
+            velocity_txns = int(fraud_txn_count * 0.25)
+            amount_txns = int(fraud_txn_count * 0.30)
+            new_acct_txns = fraud_txn_count - ring_txns - velocity_txns - amount_txns
+            
+            logger.info(f"Generating sophisticated fraud patterns: "
+                       f"{ring_txns} rings, {velocity_txns} velocity, "
+                       f"{amount_txns} amount, {new_acct_txns} new account")
+            
+            # Generate each pattern type
+            fraud_ring_txns = self._generate_bulk_fraud_rings(
+                accounts, ring_txns, spread_days, account_to_user, user_to_devices
+            )
+            velocity_anomaly_txns = self._generate_bulk_velocity_anomalies(
+                accounts, velocity_txns, spread_days, account_to_user, user_to_devices
+            )
+            amount_anomaly_txns = self._generate_bulk_amount_anomalies(
+                accounts, amount_txns, spread_days, account_to_user, user_to_devices
+            )
+            new_account_fraud_txns = self._generate_bulk_new_account_fraud(
+                accounts, new_acct_txns, spread_days, account_to_user, user_to_devices
+            )
+            
+            # Combine all fraud transactions and add to main lists
+            all_fraud_txns = fraud_ring_txns + velocity_anomaly_txns + amount_anomaly_txns + new_account_fraud_txns
+            for txn in all_fraud_txns:
+                graph_transactions.append(txn['graph'])
+                kv_transactions.extend(txn['kv'])
+            
+            result["fraud_transactions"] = len(all_fraud_txns)
+            result["fraud_patterns"] = {
+                "fraud_rings": len(fraud_ring_txns),
+                "velocity_anomalies": len(velocity_anomaly_txns),
+                "amount_anomalies": len(amount_anomaly_txns),
+                "new_account_fraud": len(new_account_fraud_txns),
+            }
+            progress_service.update_progress(
+                self.OPERATION_ID, 2, 
+                f"Generated {len(graph_transactions)} transactions in memory"
+            )
+            
+            # Stage 3: Write CSV for Graph bulk loader
+            progress_service.update_progress(self.OPERATION_ID, 2, "Writing transactions to CSV...")
+            csv_path = "/data/graph_csv/edges/transactions/transacts.csv"
+            csv_success = self._write_transactions_csv(csv_path, graph_transactions)
+            result["csv_path"] = csv_path
+            progress_service.update_progress(self.OPERATION_ID, 3, f"CSV written: {csv_path}")
+            
+            # Stage 4: Call Graph bulk loader (only load transactions directory, not all edges)
+            progress_service.update_progress(self.OPERATION_ID, 3, "Loading transactions into Graph...")
+            logger.info(f"📊 Starting Graph bulk load for transactions...")
+            logger.info(f"   CSV path: {csv_path}")
+            logger.info(f"   CSV success: {csv_success}")
+            logger.info(f"   Graph service available: {self.graph is not None}")
+            
+            # Verify some accounts exist in graph before loading
+            if self.graph and self.graph.client:
+                try:
+                    # Check a few sample accounts
+                    sample_accounts = accounts[:5] if len(accounts) >= 5 else accounts
+                    logger.info(f"🔍 Verifying sample accounts exist in Graph...")
+                    for acc_id in sample_accounts:
+                        exists = self.graph.client.V(acc_id).hasNext()
+                        logger.info(f"   Account {acc_id} exists in Graph: {exists}")
+                    
+                    # Get current edge count before load
+                    edge_count = self.graph.client.E().count().next()
+                    logger.info(f"   Current edge count in Graph before transaction load: {edge_count}")
+                except Exception as e:
+                    logger.warning(f"   Could not verify accounts: {e}")
+            
+            # Stage 4: Add transactions to Graph using PARALLEL Gremlin
+            # Uses ThreadPoolExecutor for concurrent edge creation + balance updates
+            if self.graph and self.graph.client:
+                try:
+                    logger.info(f"   Adding {len(graph_transactions)} transaction edges via parallel Gremlin...")
+                    graph_success_count = 0
+                    graph_fail_count = 0
+                    
+                    # Parallel processing with ThreadPoolExecutor
+                    max_workers = 20  # Configurable number of parallel workers
+                    total_txns = len(graph_transactions)
+                    
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # Submit all tasks
+                        futures = {
+                            executor.submit(self._process_single_transaction, txn, account_to_user): txn
+                            for txn in graph_transactions
+                        }
+                        
+                        completed = 0
+                        for future in as_completed(futures):
+                            try:
+                                result_item = future.result()
+                                if result_item["success"]:
+                                    graph_success_count += 1
+                                else:
+                                    graph_fail_count += 1
+                                    if graph_fail_count <= 5:  # Only log first 5 errors
+                                        logger.warning(f"Transaction failed: {result_item.get('error', 'Unknown')}")
+                            except Exception as e:
+                                graph_fail_count += 1
+                                if graph_fail_count <= 5:
+                                    logger.warning(f"Future exception: {e}")
+                            
+                            completed += 1
+                            
+                            # Update progress every 500 transactions
+                            if completed % 500 == 0:
+                                progress_service.update_progress(
+                                    self.OPERATION_ID, 3, 
+                                    f"Graph: Processed {completed}/{total_txns} transactions ({graph_success_count} success)..."
+                                )
+                    
+                    result["graph_edges_added"] = graph_success_count
+                    result["graph_edges_failed"] = graph_fail_count
+                    logger.info(f"✅ Graph edges: {graph_success_count} added, {graph_fail_count} failed (parallel with {max_workers} workers)")
+                    
+                    # Verify TRANSACTS edges were created
+                    transacts_count = self.graph.client.E().hasLabel('TRANSACTS').count().next()
+                    logger.info(f"   Total TRANSACTS edges in Graph: {transacts_count}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Graph edge insertion failed: {e}")
+                    result["errors"].append(f"Graph edge insertion failed: {str(e)}")
+            else:
+                logger.warning(f"⚠️ Graph service not available, skipping edge insertion")
+            progress_service.update_progress(self.OPERATION_ID, 4, "Graph bulk load complete")
+            
+            # Stage 5: Batch write to KV
+            progress_service.update_progress(self.OPERATION_ID, 4, "Batch writing to KV store...")
+            if self.kv and self.kv.is_connected():
+                kv_result = self.kv.batch_store_transactions(kv_transactions)
+                result["kv_batch_write"] = kv_result
+                logger.info(f"KV batch write result: {kv_result}")
+            else:
+                result["errors"].append("KV service not available for batch write")
+            
+            result["status"] = "completed"
+            progress_service.complete_operation(
+                self.OPERATION_ID,
+                f"Bulk injection complete: {transaction_count} transactions",
+                extra={
+                    "normal": result["normal_transactions"],
+                    "fraud": result["fraud_transactions"],
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Bulk transaction injection failed: {e}")
+            result["status"] = "failed"
+            result["errors"].append(str(e))
+            progress_service.fail_operation(self.OPERATION_ID, str(e), "Bulk injection failed")
+        
+        result["end_time"] = datetime.now().isoformat()
+        result["duration_seconds"] = (datetime.now() - start_time).total_seconds()
+        
+        total = result["normal_transactions"] + result["fraud_transactions"]
+        logger.info(f"Bulk transaction injection complete: {total} transactions in {result['duration_seconds']:.2f}s")
+        
+        return result
+    
     def _update_progress(self, increment: int = 1, message: Optional[str] = None):
         """Update progress counter and report to progress service."""
         self._current_progress += increment
@@ -193,6 +953,20 @@ class TransactionInjector:
         
         return self.graph.client.V().hasLabel("account").id_().toList()
     
+    def _get_all_accounts_from_kv(self) -> List[str]:
+        """Get all account IDs from KV store by scanning users."""
+        if not self.kv or not self.kv.is_connected():
+            raise Exception("KV service not available")
+        
+        account_ids = []
+        users = self.kv.get_all_users()
+        for user in users:
+            accounts = user.get('accounts', {})
+            account_ids.extend(accounts.keys())
+        
+        logger.info(f"Retrieved {len(account_ids)} account IDs from KV store")
+        return account_ids
+    
     def _get_new_accounts(self, days: int = 30) -> List[str]:
         """Get accounts created in the last N days."""
         if not self.graph or not self.graph.client:
@@ -208,6 +982,144 @@ class TransactionInjector:
             # Fallback: just return first 20 accounts (assume some are new)
             all_accounts = self._get_all_accounts()
             return all_accounts[:min(20, len(all_accounts))]
+    
+    def _prefetch_account_user_mappings(self) -> Dict[str, str]:
+        """
+        Get account_id → user_id mappings from KV store.
+        
+        Uses the nested 'accounts' map in each user record to build
+        a reverse mapping from account_id to user_id.
+        
+        Returns:
+            Dict mapping account_id to user_id
+        """
+        mappings = {}
+        try:
+            if not self.kv or not self.kv.is_connected():
+                logger.warning("KV service not available for account-user mapping")
+                return mappings
+            
+            users = self.kv.get_all_users()
+            for user in users:
+                user_id = user.get('user_id')
+                accounts = user.get('accounts', {})
+                for account_id in accounts.keys():
+                    mappings[account_id] = user_id
+            
+            logger.info(f"Pre-fetched {len(mappings)} account→user mappings from KV")
+        except Exception as e:
+            logger.error(f"Error fetching account-user mappings: {e}")
+        
+        return mappings
+    
+    def _prefetch_user_devices(self) -> Dict[str, List[str]]:
+        """
+        Get user_id → [device_ids] mappings from KV store.
+        
+        Returns:
+            Dict mapping user_id to list of device_ids
+        """
+        mappings = {}
+        try:
+            if not self.kv or not self.kv.is_connected():
+                return mappings
+            
+            users = self.kv.get_all_users()
+            for user in users:
+                user_id = user.get('user_id')
+                devices = user.get('devices', {})
+                if devices:
+                    mappings[user_id] = list(devices.keys())
+            
+            logger.info(f"Pre-fetched devices for {len(mappings)} users from KV")
+        except Exception as e:
+            logger.error(f"Error fetching user-device mappings: {e}")
+        
+        return mappings
+    
+    def _write_transactions_csv(self, csv_path: str, transactions: List[Dict[str, Any]]) -> bool:
+        """
+        Write transaction data to CSV in Aerospike Graph bulk loader format.
+        
+        CSV format:
+        ~from,~to,~label,txn_id:String,amount:Double,currency:String,type:String,
+        method:String,location:String,timestamp:Date,status:String,gen_type:String,device_id:String
+        
+        Args:
+            csv_path: Path to write CSV file
+            transactions: List of transaction dicts with graph edge data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            
+            logger.info(f"📝 Writing transactions CSV to: {csv_path}")
+            logger.info(f"   Total transactions to write: {len(transactions)}")
+            
+            # Log sample account IDs for debugging
+            if transactions:
+                sample_senders = set()
+                sample_receivers = set()
+                for txn in transactions[:10]:
+                    sample_senders.add(txn.get('sender_account_id', ''))
+                    sample_receivers.add(txn.get('receiver_account_id', ''))
+                logger.info(f"   Sample sender accounts: {list(sample_senders)[:5]}")
+                logger.info(f"   Sample receiver accounts: {list(sample_receivers)[:5]}")
+            
+            fieldnames = [
+                '~from', '~to', '~label',
+                'txn_id:String', 'amount:Double', 'currency:String', 'type:String',
+                'method:String', 'location:String', 'timestamp:Date', 'status:String',
+                'gen_type:String', 'device_id:String'
+            ]
+            
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for txn in transactions:
+                    row = {
+                        '~from': txn.get('sender_account_id', ''),
+                        '~to': txn.get('receiver_account_id', ''),
+                        '~label': 'TRANSACTS',
+                        'txn_id:String': txn.get('txn_id', ''),
+                        'amount:Double': txn.get('amount', 0),
+                        'currency:String': txn.get('currency', 'USD'),
+                        'type:String': txn.get('type', 'transfer'),
+                        'method:String': txn.get('method', 'electronic_transfer'),
+                        'location:String': txn.get('location', ''),
+                        'timestamp:Date': txn.get('timestamp', ''),
+                        'status:String': txn.get('status', 'completed'),
+                        'gen_type:String': txn.get('gen_type', 'HISTORICAL'),
+                        'device_id:String': txn.get('device_id', ''),
+                    }
+                    writer.writerow(row)
+            
+            # Verify file was written (os is already imported at module level)
+            if os.path.exists(csv_path):
+                file_size = os.path.getsize(csv_path)
+                logger.info(f"✅ CSV written successfully: {csv_path} ({file_size} bytes)")
+                
+                # Read first few lines to verify content
+                with open(csv_path, 'r') as f:
+                    lines = f.readlines()[:5]
+                    logger.info(f"   CSV header: {lines[0].strip() if lines else 'EMPTY'}")
+                    if len(lines) > 1:
+                        logger.info(f"   First data row: {lines[1].strip()}")
+            else:
+                logger.error(f"❌ CSV file not found after write: {csv_path}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error writing transactions CSV: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
     
     def _generate_timestamp(self, days_back_max: int) -> str:
         """Generate a random timestamp within the specified days."""

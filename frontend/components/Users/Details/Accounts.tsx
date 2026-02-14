@@ -8,11 +8,14 @@ export interface Account {
     id?: string
 	type: string
 	balance: number
-    bank_name: string
-	created_date: string
+    bank_name?: string
+	created_date?: string
 	fraud_flag?: boolean
-    status: string
+    status?: string
 }
+
+// Helper to get ID from various formats (Graph DB uses "1", KV uses "id")
+const getId = (obj: any): string => obj?.id || obj?.['1'] || ''
 
 const Accounts = ({ accounts }: { accounts: Account[] }) => {
     return (
@@ -26,8 +29,10 @@ const Accounts = ({ accounts }: { accounts: Account[] }) => {
             <CardContent>
                 {accounts.length > 0 ? (
                     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                    {accounts.map((account) => (
-                        <Card key={account["1"]} className="p-4">
+                    {accounts.map((account) => {
+                        const accountId = getId(account)
+                        return (
+                        <Card key={accountId} className="p-4">
                         <div className="space-y-3">
                             <div className="flex items-center justify-between">
                             <div>
@@ -40,7 +45,7 @@ const Accounts = ({ accounts }: { accounts: Account[] }) => {
                                     </Badge>
                                 )}
                                 </div>
-                                <p className="text-sm text-muted-foreground">ID: {account["1"]}</p>
+                                <p className="text-sm text-muted-foreground">ID: {accountId}</p>
                             </div>
                             <CreditCard className="h-8 w-8 text-muted-foreground" />
                             </div>
@@ -50,6 +55,7 @@ const Accounts = ({ accounts }: { accounts: Account[] }) => {
                                     {formatCurrency(account.balance)}
                                 </p>
                             </div>
+                            {account.created_date && (
                             <div>
                                 <p className="text-sm font-medium text-muted-foreground">Created</p>
                                 <div className="flex items-center gap-2">
@@ -57,9 +63,10 @@ const Accounts = ({ accounts }: { accounts: Account[] }) => {
                                     <p className="text-sm">{formatDate(account.created_date)}</p>
                                 </div>
                             </div>
+                            )}
                         </div>
                         </Card>
-                    ))}
+                    )})}
                 </div>
               ) : (
                 <div className="text-center py-8">

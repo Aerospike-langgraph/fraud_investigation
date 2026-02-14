@@ -12,10 +12,10 @@ export interface Transaction {
 	"1"?: string
 	id?: string
 	txn_id: string
-	IN: { "1" : string }
-	OUT: { "1" : string }
+	IN?: { "1" : string }
+	OUT?: { "1" : string }
 	amount: number
-	currency: string
+	currency?: string
 	timestamp: string
 	status: string
 	fraud_score: number
@@ -26,14 +26,14 @@ export interface Transaction {
 	location?: string
 	is_fraud?: boolean
 	fraud_type?: string
-	sender_id: string
-	receiver_id: string
+	sender_id?: string
+	receiver_id?: string
     details?: string[]
 }
 
 export interface TransactionDetail {
     txn: Transaction
-    other_party: User
+    other_party: User & { id?: string }
 }
 
 interface Props {
@@ -42,11 +42,18 @@ interface Props {
     name: string
 }
 
+// Helper to get ID from various formats (Graph DB uses "1", KV uses "id")
+const getId = (obj: any): string => obj?.id || obj?.['1'] || ''
+
 const Transactions = ({ txns, accounts, name }: Props) => {
     const getTxnDirection = (txn: any) => {
-        const senderAccountId = txn["IN"]["1"]
-        const isSender = accounts.some(acc => acc["1"] === senderAccountId)
+        // Handle both old format (IN/OUT from Graph) and new format (from KV)
+        const senderAccountId = txn?.IN?.['1'] || txn?.sender_id || ''
+        const isSender = accounts.some(acc => getId(acc) === senderAccountId)
     
+        // If we can't determine from IN, assume outgoing (backend filters for direction='out')
+        if (!senderAccountId) return 'sent'
+        
         if (isSender) return 'sent'
         else return 'received'
     }
@@ -65,12 +72,15 @@ const Transactions = ({ txns, accounts, name }: Props) => {
                     {txns.map(({txn, other_party}) => {
                         const direction = getTxnDirection(txn)
                         const displayAmount = direction === 'sent' ? -Math.abs(txn.amount) : Math.abs(txn.amount)
-                        const sender = direction === 'sent' ? name : other_party.name
-                        const receiver = direction === 'sent' ? other_party.name : name
-                        const isFraud = txn.fraud_score > 0
+                        const otherPartyName = other_party?.name || 'Unknown'
+                        const otherPartyId = getId(other_party)
+                        const sender = direction === 'sent' ? name : otherPartyName
+                        const receiver = direction === 'sent' ? otherPartyName : name
+                        const isFraud = (txn.fraud_score || 0) > 0
+                        const txnId = txn.txn_id || getId(txn)
                         
                         return (
-                            <Card key={txn[1]} className={`p-4 ${isFraud ? 'border-red-200 bg-red-50' : ''}`}>
+                            <Card key={txnId} className={`p-4 ${isFraud ? 'border-red-200 bg-red-50' : ''}`}>
                                 <div className="space-y-3">
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-2">
@@ -81,7 +91,7 @@ const Transactions = ({ txns, accounts, name }: Props) => {
                                                     'Transfer Transaction'}
                                                 </p>
                                                 <Badge variant="secondary" className="text-xs font-mono">
-                                                    {txn.txn_id.substring(0, 8)}
+                                                    {txnId.substring(0, 8)}
                                                 </Badge>
                                             </div>
                                         </div>
@@ -102,9 +112,12 @@ const Transactions = ({ txns, accounts, name }: Props) => {
                                             {direction === 'sent' ? (
                                                 <p className="font-semibold">{sender}</p>
                                             ): (
-                                                <Link href={`/users/${other_party[1]}`} className="font-semibold">{sender}</Link>
+                                                otherPartyId ? (
+                                                    <Link href={`/users/${otherPartyId}`} className="font-semibold text-blue-600 hover:underline">{sender}</Link>
+                                                ) : (
+                                                    <p className="font-semibold">{sender}</p>
+                                                )
                                             )}
-                                            <p className="text-xs text-gray-500 font-mono">{txn.IN[1]}</p>
                                         </div>
                                         <div className="flex items-center">
                                             <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center">
@@ -113,21 +126,24 @@ const Transactions = ({ txns, accounts, name }: Props) => {
                                         </div>
                                         <div className="flex-1 text-right">
                                             <p className="text-sm font-medium text-gray-600">To</p>
-                                            {direction === 'sent' ?(
-                                                <Link href={`/users/${other_party[1]}`} className="font-semibold">{receiver}</Link>
+                                            {direction === 'sent' ? (
+                                                otherPartyId ? (
+                                                    <Link href={`/users/${otherPartyId}`} className="font-semibold text-blue-600 hover:underline">{receiver}</Link>
+                                                ) : (
+                                                    <p className="font-semibold">{receiver}</p>
+                                                )
                                             ): (
                                                 <p className="font-semibold">{receiver}</p>
                                             )}
-                                            <p className="text-xs text-gray-500 font-mono">{txn.OUT[1]}</p>
                                         </div>
                                     </div>
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-3">
                                             <Badge 
-                                                variant={txn.status === 'completed' ? 'default' : 'secondary'}
+                                                variant={txn.status === 'completed' || txn.status === 'clean' ? 'default' : 'secondary'}
                                                 className="text-xs"
                                             >
-                                                {txn.status === 'completed' ? (
+                                                {txn.status === 'completed' || txn.status === 'clean' ? (
                                                     <CheckCircle className="h-3 w-3 mr-1" />
                                                 ) : (
                                                     <Clock className="h-3 w-3 mr-1" />
@@ -163,8 +179,8 @@ const Transactions = ({ txns, accounts, name }: Props) => {
                                         </div>
                                     )}
                                     <div className="border-t pt-2">
-                                        <p className="text-xs text-muted-foreground font-mono" title={txn[1]}>
-                                            Full ID: {txn.txn_id}
+                                        <p className="text-xs text-muted-foreground font-mono" title={txnId}>
+                                            Full ID: {txnId}
                                         </p>
                                     </div>
                                 </div>

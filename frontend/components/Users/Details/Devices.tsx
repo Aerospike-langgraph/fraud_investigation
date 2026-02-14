@@ -3,12 +3,16 @@ import { AlertTriangle, Monitor, Smartphone, Tablet } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 
 export interface Device {
-    "1": string
+    "1"?: string
+    id?: string
     type: string
     os: string
-    browser: string
+    browser?: string
     fraud_flag?: boolean
 }
+
+// Helper to get ID from various formats (Graph DB uses "1", KV uses "id")
+const getId = (obj: any): string => obj?.id || obj?.['1'] || ''
 
 export const getDeviceIcon = (deviceType: string) => {
     switch (deviceType.toLowerCase()) {
@@ -37,8 +41,10 @@ const Devices = ({ devices }: { devices?: Device[]}) => (
         <CardContent>
             {devices && devices.length > 0 ? (
                 <div className="grid gap-4 md:grid-cols-1 lg:grid-cols-2">
-                    {devices.map((device) => (
-                        <Card key={device["1"]} className="p-4 hover:shadow-md transition-shadow">
+                    {devices.map((device) => {
+                        const deviceId = getId(device)
+                        return (
+                        <Card key={deviceId} className="p-4 hover:shadow-md transition-shadow">
                             <div className="space-y-3">
                                 <div className="flex items-start justify-between">
                                     <div className="flex items-center gap-3">
@@ -53,16 +59,16 @@ const Devices = ({ devices }: { devices?: Device[]}) => (
                                                 </Badge>}
                                             </div>
                                             <p className="text-sm text-muted-foreground">{device.os}</p>
-                                            <p className="text-xs text-muted-foreground">{device.browser}</p>
+                                            {device.browser && <p className="text-xs text-muted-foreground">{device.browser}</p>}
                                         </div>
                                     </div>
                                     <Badge variant="secondary" className="text-xs">
-                                        {device["1"]}
+                                        {deviceId}
                                     </Badge>
                                 </div>
                             </div>
                         </Card>
-                    ))}
+                    )})}
                 </div>
             ) : (
                 <div className="text-center py-8">

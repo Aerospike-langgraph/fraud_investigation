@@ -181,7 +181,7 @@ const DataManagement = () => {
                 params.set('load_graph', String(loadGraph))
                 params.set('load_aerospike', String(aerospikeStats?.connected ? loadAerospike : false))
                 
-                response = await fetch(`/api/bulk-load-gremlin?${params.toString()}`, {
+                response = await fetch(`/api/bulk-load-csv?${params.toString()}`, {
                     method: 'POST',
                 })
             } else if (uploadedFile) {
@@ -389,7 +389,7 @@ const DataManagement = () => {
                 fraud_percentage: String(fraudPercentage / 100) // Convert to decimal
             })
             
-            const response = await fetch(`/api/inject-historical-transactions?${params.toString()}`, {
+            const response = await fetch(`/api/inject-transactions-bulk?${params.toString()}`, {
                 method: 'POST'
             })
             

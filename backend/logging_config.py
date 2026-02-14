@@ -64,9 +64,9 @@ def setup_logging():
     stats_handler.setLevel(logging.ERROR)
     stats_handler.setFormatter(stats_formatter)
 
-    # Console handler
+    # Console handler - set to INFO to see detailed logs in Docker
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.ERROR)
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(simple_formatter)
 
     # Add handlers to logger
@@ -75,27 +75,27 @@ def setup_logging():
     logger.addHandler(graph_logs_handler)
     logger.addHandler(console_handler)
     
-    # Create specific loggers
+    # Create specific loggers - set to INFO to see detailed logs
     graph_logger = logging.getLogger('fraud_detection.graph')
-    graph_logger.setLevel(logging.ERROR)
+    graph_logger.setLevel(logging.INFO)
     graph_logger.addHandler(graph_logs_handler)
     graph_logger.addHandler(console_handler)
     graph_logger.propagate = False  # Prevent propagation to parent logger
     
     api_logger = logging.getLogger('fraud_detection.api')
-    api_logger.setLevel(logging.ERROR)
+    api_logger.setLevel(logging.INFO)
     api_logger.addHandler(all_logs_handler)
     api_logger.addHandler(console_handler)
     api_logger.propagate = False  # Prevent propagation to parent logger
     
     txn_logger = logging.getLogger('fraud_detection.transaction_generator')
-    txn_logger.setLevel(logging.ERROR)
+    txn_logger.setLevel(logging.INFO)
     txn_logger.addHandler(normal_handler)
     txn_logger.addHandler(fraud_handler)
     txn_logger.addHandler(console_handler)
 
     stats_logger = logging.getLogger('fraud_detection.stats')
-    stats_logger.setLevel(logging.ERROR)
+    stats_logger.setLevel(logging.INFO)
     stats_logger.addHandler(stats_handler)
     stats_logger.addHandler(console_handler)
     

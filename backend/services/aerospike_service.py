@@ -246,7 +246,7 @@ class AerospikeService:
             # Process records in parallel using batch write
             # Aerospike batch_write uses BatchRecords
             from aerospike_helpers.batch import records as batch_records
-            from aerospike_helpers import operations as ops
+            from aerospike import operations as ops  # Use aerospike.operations, not aerospike_helpers.operations
             
             batch_recs = batch_records.BatchRecords()
             
@@ -267,6 +267,8 @@ class AerospikeService:
                     result["success"] += 1
                 else:
                     result["failed"] += 1
+            
+            logger.info(f"batch_put completed: {result['success']} success, {result['failed']} failed")
                     
         except ImportError:
             # Fallback to sequential writes if batch helpers not available
@@ -387,12 +389,102 @@ class AerospikeService:
     # User Operations
     # ----------------------------------------------------------------------------------------------------------
     
+    def _load_accounts_data(self, accounts_csv: str) -> Dict[str, Dict[str, Any]]:
+        """Load accounts from CSV into a dictionary keyed by account_id."""
+        accounts = {}
+        try:
+            with open(accounts_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    account_id = row.get('~id', '')
+                    if account_id:
+                        accounts[account_id] = {
+                            "type": row.get('type:String', ''),
+                            "balance": float(row.get('balance:Double', 0)) if row.get('balance:Double') else 0.0,
+                            "bank_name": row.get('bank_name:String', ''),
+                            "status": row.get('status:String', 'active'),
+                            "created_date": row.get('created_date:Date', ''),
+                            "is_fraud": False,  # Always False - computed by ML
+                        }
+            logger.info(f"Loaded {len(accounts)} accounts from CSV")
+        except FileNotFoundError:
+            logger.warning(f"Accounts CSV not found: {accounts_csv}")
+        except Exception as e:
+            logger.error(f"Error loading accounts: {e}")
+        return accounts
+    
+    def _load_devices_data(self, devices_csv: str) -> Dict[str, Dict[str, Any]]:
+        """Load devices from CSV into a dictionary keyed by device_id."""
+        devices = {}
+        try:
+            with open(devices_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    device_id = row.get('~id', '')
+                    if device_id:
+                        devices[device_id] = {
+                            "type": row.get('type:String', ''),
+                            "os": row.get('os:String', ''),
+                            "browser": row.get('browser:String', ''),
+                            "fingerprint": row.get('fingerprint:String', ''),
+                            "first_seen": row.get('first_seen:Date', ''),
+                            "last_login": row.get('last_login:Date', ''),
+                            "is_fraud": False,  # Always False - computed by ML
+                        }
+            logger.info(f"Loaded {len(devices)} devices from CSV")
+        except FileNotFoundError:
+            logger.warning(f"Devices CSV not found: {devices_csv}")
+        except Exception as e:
+            logger.error(f"Error loading devices: {e}")
+        return devices
+    
+    def _load_ownership_mapping(self, owns_csv: str) -> Dict[str, List[str]]:
+        """Load user->accounts mapping from owns.csv."""
+        user_accounts = {}
+        try:
+            with open(owns_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    user_id = row.get('~from', '')
+                    account_id = row.get('~to', '')
+                    if user_id and account_id:
+                        if user_id not in user_accounts:
+                            user_accounts[user_id] = []
+                        user_accounts[user_id].append(account_id)
+            logger.info(f"Loaded ownership mapping for {len(user_accounts)} users")
+        except FileNotFoundError:
+            logger.warning(f"Owns CSV not found: {owns_csv}")
+        except Exception as e:
+            logger.error(f"Error loading ownership mapping: {e}")
+        return user_accounts
+    
+    def _load_usage_mapping(self, uses_csv: str) -> Dict[str, List[str]]:
+        """Load user->devices mapping from uses.csv."""
+        user_devices = {}
+        try:
+            with open(uses_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    user_id = row.get('~from', '')
+                    device_id = row.get('~to', '')
+                    if user_id and device_id:
+                        if user_id not in user_devices:
+                            user_devices[user_id] = []
+                        user_devices[user_id].append(device_id)
+            logger.info(f"Loaded usage mapping for {len(user_devices)} users")
+        except FileNotFoundError:
+            logger.warning(f"Uses CSV not found: {uses_csv}")
+        except Exception as e:
+            logger.error(f"Error loading usage mapping: {e}")
+        return user_devices
+
     def load_users_from_csv(self, csv_path: str = None, clear_existing: bool = True) -> Dict[str, Any]:
         """
-        Load users from CSV file into Aerospike.
+        Load users from CSV file into Aerospike using batch write for better performance.
+        Also loads accounts and devices data and populates the nested maps.
         
         Args:
-            csv_path: Path to users CSV file
+            csv_path: Path to users CSV file (or base path for all CSVs)
             clear_existing: If True, truncate existing users first (clears evaluation timestamps)
             
         Returns:
@@ -401,10 +493,17 @@ class AerospikeService:
         if csv_path is None:
             csv_path = "/data/graph_csv/vertices/users/users.csv"
         
+        # Determine base path for all CSV files
+        base_path = "/data/graph_csv"
+        if csv_path and "vertices/users" in csv_path:
+            base_path = csv_path.replace("/vertices/users/users.csv", "")
+        
         result = {
             "success": False,
             "loaded": 0,
             "errors": 0,
+            "accounts_loaded": 0,
+            "devices_loaded": 0,
             "message": ""
         }
         
@@ -414,16 +513,51 @@ class AerospikeService:
             logger.info("Cleared existing users before reload")
         
         try:
+            # Step 1: Load accounts and devices data
+            accounts_csv = f"{base_path}/vertices/accounts/accounts.csv"
+            devices_csv = f"{base_path}/vertices/devices/devices.csv"
+            owns_csv = f"{base_path}/edges/ownership/owns.csv"
+            uses_csv = f"{base_path}/edges/usage/uses.csv"
+            
+            logger.info("Loading accounts and devices data...")
+            accounts_data = self._load_accounts_data(accounts_csv)
+            devices_data = self._load_devices_data(devices_csv)
+            
+            # Step 2: Load ownership and usage mappings
+            logger.info("Loading ownership and usage mappings...")
+            user_accounts_map = self._load_ownership_mapping(owns_csv)
+            user_devices_map = self._load_usage_mapping(uses_csv)
+            
+            # Step 3: Load users and populate with accounts/devices
+            batch_records = []
+            parse_errors = 0
+            total_accounts = 0
+            total_devices = 0
+            
             with open(csv_path, 'r') as f:
                 reader = csv.DictReader(f)
                 
                 for row in reader:
                     user_id = row.get('~id', '')
                     if not user_id:
-                        result["errors"] += 1
+                        parse_errors += 1
                         continue
                     
-                    # Parse user data with nested accounts/devices maps
+                    # Build accounts map for this user
+                    user_accounts = {}
+                    for account_id in user_accounts_map.get(user_id, []):
+                        if account_id in accounts_data:
+                            user_accounts[account_id] = accounts_data[account_id]
+                            total_accounts += 1
+                    
+                    # Build devices map for this user
+                    user_devices = {}
+                    for device_id in user_devices_map.get(user_id, []):
+                        if device_id in devices_data:
+                            user_devices[device_id] = devices_data[device_id]
+                            total_devices += 1
+                    
+                    # Parse user data with populated accounts/devices maps
                     user_data = {
                         "user_id": user_id,
                         "name": row.get('name:String', ''),
@@ -435,9 +569,9 @@ class AerospikeService:
                         "risk_score": 0.0,  # Initial risk score (will be computed)
                         "signup_date": row.get('signup_date:Date', ''),
                         "created_at": datetime.now().isoformat(),
-                        # Nested maps for accounts and devices
-                        "accounts": {},  # {account_id: {type, balance, bank_name, ...}}
-                        "devices": {},   # {device_id: {type, os, browser, ...}}
+                        # Nested maps for accounts and devices - NOW POPULATED!
+                        "accounts": user_accounts,
+                        "devices": user_devices,
                         # Evaluation tracking
                         "last_eval": None,
                         "eval_count": 0,
@@ -451,13 +585,18 @@ class AerospikeService:
                         "resol_notes": None
                     }
                     
-                    if self.put(SET_USERS, user_id, user_data):
-                        result["loaded"] += 1
-                    else:
-                        result["errors"] += 1
+                    batch_records.append((user_id, user_data))
+            
+            # Write ALL records at once using batch_put
+            logger.info(f"Batch writing {len(batch_records)} users to Aerospike...")
+            batch_result = self.batch_put(SET_USERS, batch_records)
+            result["loaded"] = batch_result.get("success", 0)
+            result["errors"] = batch_result.get("failed", 0) + parse_errors
+            result["accounts_loaded"] = total_accounts
+            result["devices_loaded"] = total_devices
             
             result["success"] = True
-            result["message"] = f"Loaded {result['loaded']} users into Aerospike"
+            result["message"] = f"Loaded {result['loaded']} users with {total_accounts} accounts and {total_devices} devices"
             logger.info(result["message"])
             
         except FileNotFoundError:
@@ -952,6 +1091,37 @@ class AerospikeService:
         user = self.get_user(user_id)
         return user.get('devices', {}) if user else {}
     
+    def update_account_balance(self, user_id: str, account_id: str, delta: float) -> float:
+        """
+        Update account balance atomically.
+        
+        Args:
+            user_id: The user who owns the account
+            account_id: The account to update
+            delta: Amount to add (positive) or subtract (negative)
+            
+        Returns:
+            New balance (can be negative)
+            
+        Raises:
+            ValueError: If user or account not found
+        """
+        user = self.get_user(user_id)
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+        
+        accounts = user.get('accounts', {})
+        if account_id not in accounts:
+            raise ValueError(f"Account {account_id} not found for user {user_id}")
+        
+        current = accounts[account_id].get('balance', 0.0)
+        new_balance = current + delta
+        accounts[account_id]['balance'] = new_balance
+        user['accounts'] = accounts
+        self.put(SET_USERS, user_id, user)
+        
+        return new_balance
+    
     def flag_account_in_user(self, user_id: str, account_id: str, is_fraud: bool) -> bool:
         """
         Update is_fraud flag for an account in user's accounts map.
@@ -1242,6 +1412,69 @@ class AerospikeService:
         except Exception as e:
             logger.error(f"Error storing transaction for {account_id}: {e}")
             return False
+    
+    def batch_store_transactions(self, transactions: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Batch store multiple transactions to KV.
+        Groups transactions by record_key (account_id:date) for efficient writes.
+        
+        Args:
+            transactions: List of transaction dicts with account_id, direction, txn_data
+            
+        Returns:
+            Dict with 'success' and 'failed' counts
+        """
+        result = {"success": 0, "failed": 0}
+        
+        if not self.is_connected() or not transactions:
+            return result
+        
+        try:
+            # Group transactions by record_key (account_id:date)
+            grouped = {}  # {record_key: {'txs': {timestamp: txn_entry}, 'account_id': ..., 'day': ...}}
+            
+            for txn in transactions:
+                account_id = txn.get('account_id')
+                timestamp = txn.get('timestamp', datetime.now().isoformat())
+                record_key = self._get_transaction_key(account_id, timestamp)
+                
+                if record_key not in grouped:
+                    grouped[record_key] = {
+                        'txs': {},
+                        'account_id': account_id,
+                        'day': record_key.split(':')[1]  # YYYY-MM-DD format
+                    }
+                
+                txn_entry = {
+                    'txn_id': txn.get('txn_id', ''),
+                    'amount': float(txn.get('amount', 0)),
+                    'type': txn.get('type', 'transfer'),
+                    'counterparty': txn.get('counterparty', ''),
+                    'user_id': txn.get('user_id', ''),
+                    'counterparty_user_id': txn.get('counterparty_user_id', ''),
+                    'direction': txn.get('direction', 'out'),
+                    'method': txn.get('method', 'electronic'),
+                    'location': txn.get('location', ''),
+                    'status': txn.get('status', 'completed'),
+                    'device_id': txn.get('device_id', ''),
+                    'is_fraud': txn.get('is_fraud', False),
+                }
+                grouped[record_key]['txs'][timestamp] = txn_entry
+            
+            # Batch write all grouped records
+            batch_records = [(key, data) for key, data in grouped.items()]
+            batch_result = self.batch_put(SET_TRANSACTIONS, batch_records)
+            
+            result["success"] = batch_result.get("success", 0)
+            result["failed"] = batch_result.get("failed", 0)
+            
+            logger.info(f"Batch stored {result['success']} transaction records ({len(transactions)} transactions)")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error batch storing transactions: {e}")
+            result["failed"] = len(transactions)
+            return result
     
     def get_transactions_for_account(self, account_id: str, days: int = 7) -> List[Dict[str, Any]]:
         """
