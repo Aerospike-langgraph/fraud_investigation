@@ -14,6 +14,7 @@ from typing import Dict, Any, AsyncGenerator
 import logging
 
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.aerospike import AerospikeSaver
 
 from workflow.state import InvestigationState, create_initial_state
 from workflow.nodes.alert_validation import alert_validation_node
@@ -95,10 +96,17 @@ def create_investigation_workflow(
     workflow.add_edge("llm_agent", "report_generation")
     workflow.add_edge("report_generation", END)
     
-    # Compile the workflow
-    compiled = workflow.compile()
-    
-    logger.info("Investigation workflow compiled (4-node agentic architecture)")
+    # Compile the workflow (with Aerospike checkpointer when KV is connected)
+    if aerospike_service is not None and aerospike_service.is_connected():
+        saver = AerospikeSaver(
+            client=aerospike_service.client,
+            namespace=aerospike_service.namespace,
+        )
+        compiled = workflow.compile(checkpointer=saver)
+        logger.info("Investigation workflow compiled with Aerospike checkpointer (4-node agentic architecture)")
+    else:
+        compiled = workflow.compile()
+        logger.info("Investigation workflow compiled without checkpointer (Aerospike KV unavailable)")
     
     return compiled
 
@@ -124,9 +132,15 @@ async def run_investigation(
     
     logger.info(f"Starting investigation {investigation_id} for user {user_id}")
     
+    # Config for LangGraph: thread_id required for checkpointing; checkpoint_ns namespaces investigation checkpoints
+    config = {
+        "configurable": {"thread_id": investigation_id, "checkpoint_ns": "investigation"},
+        "recursion_limit": 50,
+    }
+    
     # Run the workflow with streaming
     try:
-        async for event in workflow.astream(initial_state, {"recursion_limit": 50}):
+        async for event in workflow.astream(initial_state, config):
             # Extract node name and state updates
             for node_name, state_update in event.items():
                 # Yield trace events from the state update
