@@ -23,13 +23,13 @@ class AlertEvidence(TypedDict):
 
 
 class InitialEvidence(TypedDict):
-    """Initial evidence from data collection node."""
+    """Initial evidence from data collection node (all from KV store)."""
     user_id: str
     profile: Dict[str, Any]
-    accounts: List[Dict[str, Any]]
-    devices: List[Dict[str, Any]]
-    recent_transactions: List[Dict[str, Any]]
-    direct_connections: List[Dict[str, Any]]
+    accounts: Dict[str, Dict[str, Any]]       # account_id -> {type, balance, status, is_fraud, ...}
+    devices: Dict[str, Dict[str, Any]]         # device_id -> {type, os, browser, is_fraud, ...}
+    account_facts: Dict[str, Dict[str, Any]]   # account_id -> 15 pre-computed risk features
+    device_facts: Dict[str, Dict[str, Any]]    # device_id -> 5 pre-computed risk features
     account_metrics: Dict[str, Any]
     alert_evidence: Dict[str, Any]
 
@@ -68,6 +68,34 @@ class TraceEvent(TypedDict):
     node: str
     timestamp: str
     data: Dict[str, Any]
+
+
+class PerformanceMetrics(TypedDict):
+    """Performance metrics for the investigation workflow."""
+    # Timing
+    total_duration_ms: float
+    node_durations: Dict[str, float]  # node_name -> duration_ms
+    
+    # Database calls
+    total_db_calls: int
+    kv_calls: int
+    graph_calls: int
+    kv_time_ms: float
+    graph_time_ms: float
+    
+    # Checkpoints
+    checkpoint_calls: int
+    checkpoint_time_ms: float
+    
+    # LLM
+    llm_calls: int
+    llm_time_ms: float
+    llm_tokens_in: int
+    llm_tokens_out: int
+    
+    # Tool usage
+    tool_calls_count: int
+    tool_breakdown: Dict[str, int]  # tool_name -> count
 
 
 # ─────────────────────────────────────────────────────────────────────────────

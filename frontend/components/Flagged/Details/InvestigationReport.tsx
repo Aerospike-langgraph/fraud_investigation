@@ -1,7 +1,14 @@
 "use client";
 
-import React from "react";
+import React, { useRef, useCallback } from "react";
+import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+const MermaidDiagram = dynamic(() => import("@/components/MermaidDiagram"), {
+  ssr: false,
+  loading: () => <div className="bg-slate-100 rounded-md p-4 text-center text-sm text-slate-500 animate-pulse">Loading diagram...</div>,
+});
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +28,7 @@ import {
   Activity,
   Download,
 } from "lucide-react";
+import { FraudRingGraph } from "./FraudRingGraph";
 import type {
   TypologyAssessment,
   RiskAssessment,
@@ -30,6 +38,9 @@ import type {
 } from "@/hooks/useInvestigation";
 
 interface InvestigationReportProps {
+  // User ID for fraud ring graph
+  userId?: string;
+
   // New agentic workflow props
   finalAssessment?: FinalAssessment;
   toolCalls?: ToolCall[];
@@ -79,6 +90,7 @@ const actionColors: Record<string, string> = {
 };
 
 export function InvestigationReport({
+  userId,
   finalAssessment,
   toolCalls,
   agentIterations,
@@ -103,19 +115,81 @@ export function InvestigationReport({
   const hasAgentResults = finalAssessment || (toolCalls && toolCalls.length > 0);
   const hasLegacyResults = risk || decision || report;
   
-  const handleDownloadReport = () => {
-    if (!report) return;
-    
-    const blob = new Blob([report], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `fraud-investigation-report-${new Date().toISOString().split('T')[0]}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+  const reportContentRef = useRef<HTMLDivElement>(null);
+  
+  const handleDownloadReport = useCallback(async () => {
+    if (!reportContentRef.current) return;
+
+    // Dynamic imports to avoid SSR issues
+    const html2canvasModule = await import("html2canvas-pro");
+    const html2canvas = html2canvasModule.default;
+    const { jsPDF } = await import("jspdf");
+
+    const element = reportContentRef.current;
+    const fileName = `fraud-investigation-report-${new Date().toISOString().split("T")[0]}.pdf`;
+
+    // Temporarily remove height cap & overflow so html2canvas captures the FULL report
+    const prevMaxH = element.style.maxHeight;
+    const prevOverflow = element.style.overflow;
+    element.style.maxHeight = "none";
+    element.style.overflow = "visible";
+
+    // Render the element to a canvas (html2canvas-pro supports oklch natively)
+    const canvas = await html2canvas(element, {
+      scale: 2,
+      useCORS: true,
+      logging: false,
+    });
+
+    // Restore original scroll constraints
+    element.style.maxHeight = prevMaxH;
+    element.style.overflow = prevOverflow;
+
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 10;
+    const contentWidth = pageWidth - 2 * margin;
+
+    // Scale the canvas image to fit the page width
+    const imgWidth = contentWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+    // Handle multi-page: slice the tall image into page-sized chunks
+    const usableHeight = pageHeight - 2 * margin;
+    let yOffset = 0;
+    let page = 0;
+
+    while (yOffset < imgHeight) {
+      if (page > 0) pdf.addPage();
+
+      // Create a cropped canvas for this page slice
+      const sliceCanvas = document.createElement("canvas");
+      sliceCanvas.width = canvas.width;
+      const srcYStart = Math.round((yOffset / imgHeight) * canvas.height);
+      const srcSliceH = Math.round((usableHeight / imgHeight) * canvas.height);
+      const actualSliceH = Math.min(srcSliceH, canvas.height - srcYStart);
+      sliceCanvas.height = actualSliceH;
+
+      const ctx = sliceCanvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(
+          canvas,
+          0, srcYStart, canvas.width, actualSliceH,
+          0, 0, canvas.width, actualSliceH
+        );
+      }
+      const sliceData = sliceCanvas.toDataURL("image/jpeg", 0.95);
+      const slicePageH = (actualSliceH * imgWidth) / canvas.width;
+      pdf.addImage(sliceData, "JPEG", margin, margin, imgWidth, slicePageH);
+
+      yOffset += usableHeight;
+      page++;
+    }
+
+    pdf.save(fileName);
+  }, []);
   
   if (!hasAgentResults && !hasLegacyResults) {
     return (
@@ -181,15 +255,17 @@ export function InvestigationReport({
               )}
               <div className="flex justify-between">
                 <span className="text-slate-500">Accounts</span>
-                <span className="text-slate-900">{initialEvidence.accounts?.length || 0}</span>
+                <span className="text-slate-900">{initialEvidence.accounts ? Object.keys(initialEvidence.accounts).length : 0}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Recent Transactions</span>
-                <span className="text-slate-900">{initialEvidence.recent_transactions?.length || 0}</span>
+                <span className="text-slate-500">Devices</span>
+                <span className="text-slate-900">{initialEvidence.devices ? Object.keys(initialEvidence.devices).length : 0}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Direct Connections</span>
-                <span className="text-slate-900">{initialEvidence.direct_connections?.length || 0}</span>
+                <span className="text-slate-500">Flagged Accounts</span>
+                <span className={initialEvidence.account_metrics?.flagged_account_count > 0 ? "text-red-600 font-medium" : "text-slate-900"}>
+                  {initialEvidence.account_metrics?.flagged_account_count || 0}
+                </span>
               </div>
             </div>
           </CardContent>
@@ -517,13 +593,14 @@ export function InvestigationReport({
                 className="border-slate-300 text-slate-700 hover:bg-slate-50"
               >
                 <Download className="w-4 h-4 mr-2" />
-                Download Report
+                Download PDF
               </Button>
             </div>
           </CardHeader>
           <CardContent>
-            <div className="bg-slate-50 p-5 rounded-lg overflow-auto max-h-[500px] border border-slate-200">
+            <div ref={reportContentRef} className="bg-slate-50 p-5 rounded-lg overflow-auto max-h-[500px] border border-slate-200">
               <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
                 components={{
                   h1: ({ children }) => (
                     <h1 className="text-xl font-bold text-slate-900 mb-3 mt-4 first:mt-0 pb-2 border-b border-slate-200">
@@ -551,19 +628,65 @@ export function InvestigationReport({
                       {children}
                     </ul>
                   ),
+                  ol: ({ children }) => (
+                    <ol className="space-y-1.5 mb-3 ml-1 list-decimal list-inside">
+                      {children}
+                    </ol>
+                  ),
                   li: ({ children }) => (
                     <li className="text-sm text-slate-700 flex items-start gap-2">
                       <span className="w-1.5 h-1.5 bg-slate-400 rounded-full mt-1.5 flex-shrink-0"></span>
                       <span>{children}</span>
                     </li>
                   ),
+                  table: ({ children }) => (
+                    <div className="overflow-x-auto mb-3">
+                      <table className="w-full text-sm border-collapse border border-slate-200 rounded-md">
+                        {children}
+                      </table>
+                    </div>
+                  ),
+                  thead: ({ children }) => (
+                    <thead className="bg-slate-100">{children}</thead>
+                  ),
+                  tbody: ({ children }) => (
+                    <tbody className="divide-y divide-slate-200">{children}</tbody>
+                  ),
+                  tr: ({ children }) => (
+                    <tr className="hover:bg-slate-50 transition-colors">{children}</tr>
+                  ),
+                  th: ({ children }) => (
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider border-b border-slate-200">
+                      {children}
+                    </th>
+                  ),
+                  td: ({ children }) => (
+                    <td className="px-3 py-2 text-sm text-slate-700 border-b border-slate-100">
+                      {children}
+                    </td>
+                  ),
                   strong: ({ children }) => (
                     <strong className="font-semibold text-slate-900">{children}</strong>
                   ),
-                  code: ({ children }) => (
-                    <code className="bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono">
+                  code: ({ className, children, ...props }) => {
+                    const match = /language-mermaid/.exec(className || "");
+                    if (match) {
+                      const chart = String(children).replace(/\n$/, "");
+                      return <MermaidDiagram chart={chart} />;
+                    }
+                    return (
+                      <code className="bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded text-xs font-mono" {...props}>
+                        {children}
+                      </code>
+                    );
+                  },
+                  pre: ({ children }) => (
+                    <div className="my-3">{children}</div>
+                  ),
+                  a: ({ children, href }) => (
+                    <a href={href} className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">
                       {children}
-                    </code>
+                    </a>
                   ),
                   hr: () => <hr className="my-4 border-slate-200" />,
                 }}
@@ -571,9 +694,17 @@ export function InvestigationReport({
                 {report}
               </ReactMarkdown>
             </div>
+
+            {/* Fraud Ring Graph - shown below report but NOT included in PDF */}
+            {toolCalls && toolCalls.length > 0 && userId && (
+              <div className="mt-5">
+                <FraudRingGraph toolCalls={toolCalls} userId={userId} />
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
+
     </div>
   );
 }

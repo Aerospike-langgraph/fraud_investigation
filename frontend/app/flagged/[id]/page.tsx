@@ -31,6 +31,7 @@ import {
 import ReviewWorkflow from '@/components/Flagged/Details/ReviewWorkflow'
 import GraphVisualization from '@/components/Flagged/Details/GraphVisualization'
 import { InvestigationReport } from '@/components/Flagged/Details/InvestigationReport'
+import PerformanceMetricsPanel from '@/components/Flagged/Details/PerformanceMetricsPanel'
 import { useInvestigation } from '@/hooks/useInvestigation'
 import { useAccountData } from '@/hooks/useAccountData'
 
@@ -408,9 +409,10 @@ export default function FlaggedAccountDetailsPage() {
                             </Card>
                         </TabsContent>
 
-                        {/* Investigation Tab - Now shows only the report */}
+                        {/* Investigation Tab - Shows report (progress is in Review Workflow on the right) */}
                         <TabsContent value="investigation" className="mt-6 space-y-6">
                             <InvestigationReport
+                                userId={accountId}
                                 finalAssessment={investigation.finalAssessment}
                                 toolCalls={investigation.toolCalls}
                                 agentIterations={investigation.agentIterations}
@@ -643,6 +645,11 @@ export default function FlaggedAccountDetailsPage() {
                         highestRiskAccountId={account.highest_risk_account_id || ''}
                         existingResolutions={account.account_resolutions || {}}
                     />
+                    
+                    {/* Performance Metrics - shown after investigation runs */}
+                    {(investigation.status === 'running' || investigation.status === 'completed') && investigation.performanceMetrics && (
+                        <PerformanceMetricsPanel metrics={investigation.performanceMetrics} />
+                    )}
                 </div>
             </div>
         </div>

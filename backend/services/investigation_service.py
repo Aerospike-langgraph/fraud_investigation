@@ -192,6 +192,16 @@ class InvestigationService:
                         final_state = {}
                     final_state.update(data)
                 
+                elif event_type == "metrics":
+                    # Forward performance metrics to frontend
+                    yield {
+                        "event": "metrics",
+                        "data": {
+                            "investigation_id": investigation_id,
+                            "data": event.get("data", {})
+                        }
+                    }
+                
                 elif event_type == "complete":
                     yield {
                         "event": "complete",

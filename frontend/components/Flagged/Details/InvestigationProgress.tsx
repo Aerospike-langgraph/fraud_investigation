@@ -11,7 +11,6 @@ import {
   AlertCircle,
   Brain,
   Database,
-  Network,
   FileText,
   ShieldAlert,
   Wrench,
@@ -393,6 +392,7 @@ export function InvestigationProgress({
             </p>
           </div>
         )}
+
       </CardContent>
     </Card>
   );

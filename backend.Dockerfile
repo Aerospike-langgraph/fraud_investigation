@@ -7,7 +7,8 @@ RUN apk add --no-cache \
     build-base \
     openssl-dev \
     linux-headers \
-    zlib-dev
+    zlib-dev \
+    yaml-dev
 COPY ./backend /backend
 WORKDIR /backend
 RUN pip install -r requirements.txt

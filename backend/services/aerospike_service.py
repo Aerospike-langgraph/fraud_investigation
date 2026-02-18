@@ -289,6 +289,58 @@ class AerospikeService:
         
         return result
     
+    def batch_get(self, keys: List[tuple]) -> List[Optional[tuple]]:
+        """
+        Batch read multiple records from Aerospike.
+        
+        Works with both old (get_many) and new (batch_read) API versions.
+        
+        Args:
+            keys: List of (namespace, set, key) tuples
+            
+        Returns:
+            List of records in same order as keys. Each record is either:
+            - (key, meta, bins) tuple if found
+            - None if not found
+        """
+        if not self.is_connected() or not keys:
+            return [None] * len(keys)
+        
+        try:
+            # Try new API first (aerospike >= 7.0.0)
+            # batch_read(keys) returns BatchRecords with batch_records list
+            if hasattr(self.client, 'batch_read'):
+                batch_result = self.client.batch_read(keys)
+                
+                results = []
+                for rec in batch_result.batch_records:
+                    # result == 0 means success, result == 2 means not found
+                    if rec.result == 0 and rec.record:
+                        # rec.record is already (key, meta, bins) tuple
+                        results.append(rec.record)
+                    else:
+                        results.append(None)
+                return results
+            
+            # Fallback to old API (get_many)
+            elif hasattr(self.client, 'get_many'):
+                return self.client.get_many(keys)
+            
+            else:
+                # Neither available, fall back to sequential gets
+                results = []
+                for key in keys:
+                    try:
+                        rec = self.client.get(key)
+                        results.append(rec if rec and rec[2] else None)
+                    except Exception:
+                        results.append(None)
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error in batch_get: {e}")
+            return [None] * len(keys)
+    
     def get(self, set_name: str, key: str) -> Optional[Dict[str, Any]]:
         """
         Retrieve a record from Aerospike.
@@ -1503,7 +1555,7 @@ class AerospikeService:
                 keys.append((self.namespace, SET_TRANSACTIONS, record_key))
             
             # Batch read records
-            records = self.client.get_many(keys)
+            records = self.batch_get(keys)
             
             # Filter transactions by timestamp
             transactions = []
@@ -1555,7 +1607,7 @@ class AerospikeService:
                     key_to_account[record_key] = account_id
             
             # Batch read
-            records = self.client.get_many(keys)
+            records = self.batch_get(keys)
             
             # Process results
             for record in records:
@@ -1755,7 +1807,7 @@ class AerospikeService:
         
         try:
             keys = [(self.namespace, SET_ACCOUNT_FACT, aid) for aid in account_ids]
-            records = self.client.get_many(keys)
+            records = self.batch_get(keys)
             
             for i, record in enumerate(records):
                 if record and record[2]:
@@ -1808,7 +1860,7 @@ class AerospikeService:
         
         try:
             keys = [(self.namespace, SET_DEVICE_FACT, did) for did in device_ids]
-            records = self.client.get_many(keys)
+            records = self.batch_get(keys)
             
             for i, record in enumerate(records):
                 if record and record[2]:
@@ -1854,6 +1906,10 @@ class AerospikeService:
             "evaluations": self.truncate_set(SET_EVALUATIONS),
             "history": self.truncate_set(SET_HISTORY),
             "investigations": self.truncate_set(SET_INVESTIGATIONS),
+            # LangGraph checkpoint sets
+            "lg_checkpoints": self.truncate_set("lg_cp"),
+            "lg_checkpoint_writes": self.truncate_set("lg_cp_w"),
+            "lg_checkpoint_meta": self.truncate_set("lg_cp_meta"),
         }
     
     # ----------------------------------------------------------------------------------------------------------

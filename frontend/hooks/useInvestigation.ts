@@ -91,6 +91,33 @@ export interface ToolCall {
   iteration: number;
 }
 
+export interface PerformanceMetrics {
+  // Timing
+  total_duration_ms: number;
+  node_durations: Record<string, number>;
+  
+  // Database calls
+  total_db_calls: number;
+  kv_calls: number;
+  graph_calls: number;
+  kv_time_ms: number;
+  graph_time_ms: number;
+  
+  // Checkpoints
+  checkpoint_calls: number;
+  checkpoint_time_ms: number;
+  
+  // LLM
+  llm_calls: number;
+  llm_time_ms: number;
+  llm_tokens_in: number;
+  llm_tokens_out: number;
+  
+  // Tool usage
+  tool_calls_count: number;
+  tool_breakdown: Record<string, number>;
+}
+
 export interface InvestigationState {
   investigation_id?: string;
   user_id?: string;
@@ -127,6 +154,9 @@ export interface InvestigationState {
   risk?: RiskAssessment;
   decision?: Decision;
   report?: string;
+  
+  // Performance metrics
+  performanceMetrics?: PerformanceMetrics;
   
   // Error
   error?: string;
@@ -321,6 +351,16 @@ export function useInvestigation() {
 
             return { ...prev, ...updates };
           });
+        });
+
+        // Handle 'metrics' event
+        eventSource.addEventListener("metrics", (event) => {
+          const data = JSON.parse(event.data);
+          console.log("[Investigation] Performance metrics received:", data);
+          setState((prev) => ({
+            ...prev,
+            performanceMetrics: data.data || data,
+          }));
         });
 
         // Handle 'complete' event
