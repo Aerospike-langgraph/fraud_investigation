@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import Search, { type Account } from './Search'
-import { CreditCard, RefreshCw } from 'lucide-react'
+import { CreditCard, Loader2, Send } from 'lucide-react'
 import { type FormEvent, useEffect, useState } from 'react'
 import { toast } from "sonner"
 
@@ -73,21 +73,23 @@ const Manual = () => {
     }, [])
 
     return (
-        <Card className='flex flex-col'>
-            <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                    <CreditCard className="w-5 h-5" />
-                    <span>Manual Transaction</span>
+        <Card className="overflow-hidden border-0 shadow-sm h-full flex flex-col">
+            <CardHeader className="p-4 pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/10">
+                        <CreditCard className="h-3.5 w-3.5 text-violet-600" />
+                    </div>
+                    Manual Transaction
                 </CardTitle>
-                <CardDescription>
-                    Create a transaction between specific accounts
+                <CardDescription className="text-[11px]">
+                    Create a single transaction between two accounts
                 </CardDescription>
             </CardHeader>
-            <CardContent className="grow flex flex-col">
-                <form onSubmit={handleTxn} name="manual-txn" className="space-y-4 grow flex flex-col gap-4">
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">From Account</label>
+            <CardContent className="flex-1 flex flex-col p-4 pt-1">
+                <form onSubmit={handleTxn} name="manual-txn" className="flex-1 flex flex-col space-y-2.5">
+                    <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium">From Account</label>
                             <Search 
                                 name="from-acct"
                                 accounts={accounts}
@@ -96,8 +98,8 @@ const Manual = () => {
                                 comp={toAcct}
                                 setValue={setFromAcct} />
                         </div>
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">To Account</label>
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium">To Account</label>
                             <Search 
                                 name="to-acct"
                                 accounts={accounts}
@@ -107,29 +109,30 @@ const Manual = () => {
                                 setValue={setToAcct} />
                         </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">Amount (USD)</label>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium">Amount (USD)</label>
                             <Input
                                 required
                                 name="amount"
                                 type="number"
                                 value={amount}
                                 onChange={(e) => setAmount(e.target.value)}
-                                placeholder="Enter amount"
+                                placeholder="0.00"
                                 min="0.01"
                                 step="0.01"
                                 disabled={loading}
+                                className="h-7 text-xs"
                             />
                         </div>
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">Transaction Type</label>
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium">Type</label>
                             <select
                                 required
                                 name="type"
                                 value={txnType}
                                 onChange={(e) => setTxnType(e.target.value as ManualTxn['txnType'])}
-                                className="w-full p-2 border rounded-md bg-background"
+                                className="w-full h-7 px-2 text-xs border rounded-md bg-background"
                                 disabled={loading}
                             >
                                 <option value="transfer">Transfer</option>
@@ -139,21 +142,23 @@ const Manual = () => {
                             </select>
                         </div>
                     </div>
-                    <Button
-                        type='submit'
-                        disabled={loading || !fromAcct || !toAcct || !amount}
-                        className="w-full"
-                        style={{ marginTop: 'auto' }}
-                    >
-                        {loading ? (
-                            <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                        ) : (
-                            <CreditCard className="w-4 h-4 mr-2" />
-                        )}
-                        Create Transaction
-                    </Button>
+                    <div className="mt-auto">
+                        <Button
+                            type='submit'
+                            disabled={loading || !fromAcct || !toAcct || !amount}
+                            size="sm"
+                            className="w-full h-7 text-xs"
+                        >
+                            {loading ? (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                                <Send className="h-3 w-3 mr-1" />
+                            )}
+                            Create Transaction
+                        </Button>
+                    </div>
                 </form>
-              </CardContent>
+            </CardContent>
         </Card>
     )
 }

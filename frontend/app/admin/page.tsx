@@ -34,11 +34,11 @@ export default function AdminPage() {
 					</TabsTrigger>
 					<TabsTrigger value="generation" className="flex items-center space-x-2">
 						<Activity className="w-4 h-4" />
-						<span>Transaction Generation</span>
+						<span>RT Transaction Generation</span>
 					</TabsTrigger>
 					<TabsTrigger value="fraud-detection" className="flex items-center space-x-2">
 						<Shield className="w-4 h-4" />
-						<span>Fraud Detection</span>
+						<span>Fraud Detection Rules</span>
 					</TabsTrigger>
 	
 					<TabsTrigger value="performance" className="flex items-center space-x-2">
