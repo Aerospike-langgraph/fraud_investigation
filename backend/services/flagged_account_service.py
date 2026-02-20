@@ -417,8 +417,13 @@ class FlaggedAccountService:
                             user_prediction = ml_model_service.predict_user_risk(account_predictions)
                             risk_score = user_prediction["risk_score"]
                             
-                            # Update user evaluation in Aerospike
+                            # Update user evaluation in Aerospike KV
                             self._aerospike.update_user_evaluation(user_id, risk_score)
+                            
+                            # Sync risk score to Graph DB (for fraud ring queries)
+                            if self.graph_service:
+                                self.graph_service.update_user_risk_score(user_id, risk_score)
+                            
                             job_result["users_evaluated"] += 1
                             
                             # Flag if above threshold
@@ -721,8 +726,7 @@ class FlaggedAccountService:
         """Extract features for a user from their Aerospike data and graph relationships."""
         try:
             # Get the user's pre-existing risk score from their profile
-            # Use curr_risk (actual computed score) first, fallback to risk_score (initial value)
-            base_risk_score = user_data.get("curr_risk") or user_data.get("risk_score") or 0
+            base_risk_score = user_data.get("risk_score") or 0
             
             # Start with user's stored data
             features = {
@@ -872,8 +876,8 @@ class FlaggedAccountService:
                    search_lower in a.get("user_id", "").lower()
             ]
         
-        # Sort by risk score (highest first)
-        accounts.sort(key=lambda x: x.get("risk_score", 0), reverse=True)
+        # Sort by risk score (highest first), then alphabetically by account holder name for ties
+        accounts.sort(key=lambda x: (-x.get("risk_score", 0), x.get("account_holder", "").lower()))
         
         # Paginate
         total = len(accounts)

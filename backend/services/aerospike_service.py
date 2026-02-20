@@ -63,7 +63,6 @@ BIN_NAME_MAP = {
     'transaction_count': 'txn_count',
     'investigation_started': 'invest_started',
     'resolution_notes': 'resol_notes',
-    'current_risk_score': 'curr_risk_score',
     'assigned_analyst': 'assigned_anlst',
     'account_holder': 'acct_holder',
     'account_predictions': 'acct_preds',
@@ -627,7 +626,7 @@ class AerospikeService:
                         # Evaluation tracking
                         "last_eval": None,
                         "eval_count": 0,
-                        "curr_risk": None,  # Current computed risk score
+                        # risk_score is set to 0.0 above — ML detection will update it
                         # Workflow tracking
                         "wf_status": None,
                         "flagged_date": None,
@@ -927,7 +926,7 @@ class AerospikeService:
                 if record and len(record) > 2 and record[2]:
                     bins = record[2]
                     total_users += 1
-                    risk_score = bins.get('curr_risk', 0) or bins.get('risk_score', 0) or 0
+                    risk_score = bins.get('risk_score', 0) or 0
                     if risk_score >= 70:
                         total_high_risk += 1
                     elif risk_score >= 25:
@@ -1063,13 +1062,13 @@ class AerospikeService:
             return {'result': [], 'total': 0, 'total_pages': 0, 'page': page, 'page_size': page_size}
     
     def update_user_evaluation(self, user_id: str, risk_score: float) -> bool:
-        """Update user's evaluation data."""
+        """Update user's evaluation data and risk score."""
         user = self.get_user(user_id)
         if not user:
             return False
         
         user["last_eval"] = datetime.now().isoformat()
-        user["curr_risk"] = risk_score
+        user["risk_score"] = risk_score
         user["eval_count"] = user.get("eval_count", 0) + 1
         
         return self.put(SET_USERS, user_id, user)
@@ -1879,20 +1878,133 @@ class AerospikeService:
     # ----------------------------------------------------------------------------------------------------------
     # Statistics
     # ----------------------------------------------------------------------------------------------------------
+
+    def get_dashboard_stats(self) -> Dict[str, Any]:
+        """
+        Get dashboard statistics entirely from KV store.
+        Returns: users, txns, flagged, amount, fraud_rate, health
+        """
+        if not self.is_connected():
+            return {
+                "users": 0, "txns": 0, "flagged": 0,
+                "amount": 0.0, "fraud_rate": 0.0, "health": "disconnected"
+            }
+
+        try:
+            # Count users
+            total_users = 0
+            scan_users = self.client.scan(self.namespace, SET_USERS)
+            def count_users(record):
+                nonlocal total_users
+                if record and len(record) > 2 and record[2]:
+                    total_users += 1
+            scan_users.foreach(count_users)
+
+            # Scan transactions for totals
+            total_txns = 0
+            total_flagged = 0
+            total_amount = 0.0
+
+            scan_txns = self.client.scan(self.namespace, SET_TRANSACTIONS)
+            def process_txn(record):
+                nonlocal total_txns, total_flagged, total_amount
+                if record and len(record) > 2 and record[2]:
+                    bins = record[2]
+                    txs_map = bins.get('txs', {})
+                    for ts, txn in txs_map.items():
+                        # Only count outgoing to avoid double counting
+                        if txn.get('direction') != 'out':
+                            continue
+                        total_txns += 1
+                        total_amount += float(txn.get('amount', 0) or 0)
+                        if txn.get('is_fraud'):
+                            total_flagged += 1
+
+            scan_txns.foreach(process_txn)
+
+            fraud_rate = (total_flagged / total_txns * 100) if total_txns > 0 else 0.0
+
+            return {
+                "users": total_users,
+                "txns": total_txns,
+                "flagged": total_flagged,
+                "amount": round(total_amount, 2),
+                "fraud_rate": round(fraud_rate, 2),
+                "health": "connected"
+            }
+        except Exception as e:
+            logger.error(f"Error getting dashboard stats from KV: {e}")
+            return {
+                "users": 0, "txns": 0, "flagged": 0,
+                "amount": 0.0, "fraud_rate": 0.0, "health": "error"
+            }
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics about stored data."""
+        """
+        Get statistics about stored data.
+        Optimized: single scan of users for workflow status counts,
+        and lightweight set-count queries for other sets.
+        """
+        if not self.is_connected():
+            return {
+                "users_count": 0, "flagged_accounts_count": 0,
+                "account_facts_count": 0, "device_facts_count": 0,
+                "transaction_records_count": 0,
+                "pending_review": 0, "under_investigation": 0,
+                "confirmed_fraud": 0, "cleared": 0,
+                "connected": False
+            }
+
+        # Single scan of users to count workflow statuses
+        users_count = 0
+        pending_review = 0
+        under_investigation = 0
+        confirmed_fraud = 0
+        cleared = 0
+
+        try:
+            scan = self.client.scan(self.namespace, SET_USERS)
+            def count_user(record):
+                nonlocal users_count, pending_review, under_investigation, confirmed_fraud, cleared
+                if record and len(record) > 2 and record[2]:
+                    users_count += 1
+                    wf = record[2].get('wf_status') or record[2].get('workflow_status', '')
+                    if wf == 'pending_review':
+                        pending_review += 1
+                    elif wf == 'under_investigation':
+                        under_investigation += 1
+                    elif wf == 'confirmed_fraud':
+                        confirmed_fraud += 1
+                    elif wf == 'cleared':
+                        cleared += 1
+            scan.foreach(count_user)
+        except Exception as e:
+            logger.error(f"Error scanning users for stats: {e}")
+
+        # Count other sets with lightweight scans (count only, don't load full records)
+        def _count_set(set_name: str) -> int:
+            count = 0
+            try:
+                s = self.client.scan(self.namespace, set_name)
+                def inc(record):
+                    nonlocal count
+                    count += 1
+                s.foreach(inc)
+            except Exception:
+                pass
+            return count
+
         return {
-            "users_count": len(self.scan_all(SET_USERS, limit=100000)),
-            "flagged_accounts_count": len(self.scan_all(SET_FLAGGED_ACCOUNTS, limit=100000)),
-            "account_facts_count": len(self.scan_all(SET_ACCOUNT_FACT, limit=100000)),
-            "device_facts_count": len(self.scan_all(SET_DEVICE_FACT, limit=100000)),
-            "transaction_records_count": len(self.scan_all(SET_TRANSACTIONS, limit=100000)),
-            "pending_review": len(self.get_users_by_workflow_status("pending_review")),
-            "under_investigation": len(self.get_users_by_workflow_status("under_investigation")),
-            "confirmed_fraud": len(self.get_users_by_workflow_status("confirmed_fraud")),
-            "cleared": len(self.get_users_by_workflow_status("cleared")),
-            "connected": self.is_connected()
+            "users_count": users_count,
+            "flagged_accounts_count": _count_set(SET_FLAGGED_ACCOUNTS),
+            "account_facts_count": _count_set(SET_ACCOUNT_FACT),
+            "device_facts_count": _count_set(SET_DEVICE_FACT),
+            "transaction_records_count": _count_set(SET_TRANSACTIONS),
+            "pending_review": pending_review,
+            "under_investigation": under_investigation,
+            "confirmed_fraud": confirmed_fraud,
+            "cleared": cleared,
+            "connected": True
         }
     
     def truncate_all_data(self) -> Dict[str, bool]:

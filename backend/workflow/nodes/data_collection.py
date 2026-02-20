@@ -189,7 +189,7 @@ def _get_user_profile(aerospike_service: Any, user_id: str) -> Dict[str, Any]:
                 "age": user_data.get("age", 0),
                 "signup_date": user_data.get("signup_date", ""),
                 "workflow_status": user_data.get("workflow_status", "pending_review"),
-                "current_risk_score": user_data.get("curr_risk", 0)
+                "current_risk_score": user_data.get("risk_score", 0)
             }
         return {}
     except Exception as e:

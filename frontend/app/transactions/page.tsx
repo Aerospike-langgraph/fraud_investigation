@@ -1,7 +1,4 @@
-'use server'
-
 import Results, { type Option } from '@/components/ResultTable'
-import { Suspense } from 'react'
 import TransactionStats from '@/components/Transactions/Stats'
 
 export interface TransactionStats {
@@ -101,23 +98,7 @@ const options: Option[] = [
 	}
 ]
 
-const API_BASE_URL = process.env.BASE_URL || "http://localhost:8080/api"
-
-export default async function TransactionsPage() { 
-	async function handleSearch(
-		page: number = 1,
-		size: number = 10,
-		orderBy: string = "date",
-		order: 'asc' | 'desc' = 'desc', 
-		query?: string
-	) {
-		"use server"
-		
-		const response = await fetch(`${API_BASE_URL}/transactions?page=${page}&page_size=${size}&order_by=${orderBy}&order=${order}${query ? `&query=${query}` : ''}`, { cache: 'no-store' });
-		const search = await response.json()
-		return search
-	}
-
+export default function TransactionsPage() { 
 	return (
     	<div className="space-y-6 flex flex-col grow">
       		<div className="flex items-center justify-between">
@@ -127,12 +108,10 @@ export default async function TransactionsPage() {
         		</div>
       		</div>
 			<div className="grid gap-4 md:grid-cols-4">
-				<Suspense fallback={<TransactionStats loading />}>
-					<TransactionStats />
-				</Suspense>
+				<TransactionStats />
 			</div>
 			<Results 
-				handleSearch={handleSearch}
+				apiUrl="/api/transactions"
 				title="Transactions"
 				options={options} />
 		</div>

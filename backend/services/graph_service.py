@@ -411,6 +411,19 @@ class GraphService:
             return []
 
 
+    def update_user_risk_score(self, user_id: str, risk_score: float) -> bool:
+        """Update the risk_score property on a user vertex in the graph."""
+        try:
+            if not self.client:
+                logger.warning("Graph client not available — cannot update risk score")
+                return False
+            
+            self.client.V(user_id).property("risk_score", risk_score).iterate()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating risk score for user {user_id} in graph: {e}")
+            return False
+
     def get_user_connected_devices(self, user_id: str) -> List[Dict[str, Any]]:
         """Get users who share devices with the specified user"""
         try:

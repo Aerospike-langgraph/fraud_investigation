@@ -1,8 +1,5 @@
-'use server'
-
 import Results, { type Option } from '@/components/ResultTable'
 import UserStats from '@/components/Users/Stats'
-import { Suspense } from 'react'
 
 const options: Option[] = [
 	{
@@ -81,23 +78,7 @@ const options: Option[] = [
 	}
 ]
 
-const API_BASE_URL = process.env.BASE_URL || "http://localhost:8080/api"
-
-export default async function UsersPage() {
-	async function handleSearch(
-		page: number = 1,
-		size: number = 10,
-		orderBy: string = "date",
-		order: 'asc' | 'desc' = 'desc', 
-		query?: string
-	) {
-		"use server"
-		
-		const response = await fetch(`${API_BASE_URL}/users?page=${page}&page_size=${size}&order_by=${orderBy}&order=${order}${query ? `&query=${query}` : ''}`, { cache: 'no-store' });
-		const search = await response.json()
-		return search
-	}
-	
+export default function UsersPage() {
   	return (
     	<div className="space-y-6 flex flex-col grow">
 			<div>
@@ -105,12 +86,10 @@ export default async function UsersPage() {
 				<p className="text-muted-foreground">Browse and search user profiles with detailed information</p>
 			</div>
 			<div className="grid gap-4 md:grid-cols-4">
-				<Suspense fallback={<UserStats loading />}>
-					<UserStats />
-				</Suspense>
+				<UserStats />
 			</div>
 			<Results 
-				handleSearch={handleSearch}
+				apiUrl="/api/users"
 				title='Users'
 				options={options} />
     	</div>

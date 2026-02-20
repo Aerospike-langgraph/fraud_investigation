@@ -45,7 +45,12 @@ import {
     ChevronUp
 } from 'lucide-react'
 import { toast } from 'sonner'
+<<<<<<< HEAD
 import { setDisplayLocale, getDisplayLocale, formatCurrencyWithLocale } from '@/lib/utils'
+=======
+import { useOperationProgress } from '@/context/OperationProgressContext'
+import useSWR, { useSWRConfig } from 'swr'
+>>>>>>> 0b07d9b (Resolved all issues and changes)
 
 interface BulkLoadStatus {
     loading: boolean
@@ -121,18 +126,24 @@ interface JobHistoryItem {
 }
 
 const DataManagement = () => {
-    const [bulkLoadStatus, setBulkLoadStatus] = useState<BulkLoadStatus>({ loading: false })
-    const [isLoading, setIsLoading] = useState(false)
-    const [graphStats, setGraphStats] = useState<GraphStats | null>(null)
-    const [aerospikeStats, setAerospikeStats] = useState<AerospikeStats | null>(null)
-    const [loadingStats, setLoadingStats] = useState(false)
-    const [bulkLoadProgress, setBulkLoadProgress] = useState<{
-        current: number
-        total: number
-        percentage: number
-        message: string
-        estimated_remaining_seconds: number | null
-    } | null>(null)
+    const opCtx = useOperationProgress()
+    const { mutate: globalMutate } = useSWRConfig()
+
+    const [bulkLoadStatusLocal, setBulkLoadStatusLocal] = useState<BulkLoadStatus>({ loading: false })
+
+    // SWR-cached stats — no duplicate fetches, instant on revisit
+    const { data: dashboardData, isLoading: loadingDashboard, mutate: mutateDashboard } = useSWR<{users: number, txns: number, flagged: number}>('/api/dashboard/stats')
+    const { data: aerospikeStats, isLoading: loadingAerospikeStats, mutate: mutateAerospikeStats } = useSWR<AerospikeStats>('/api/aerospike/stats')
+
+    const graphStats: GraphStats | null = dashboardData ? {
+        users: dashboardData.users || 0,
+        accounts: 0,
+        devices: 0,
+        transactions: dashboardData.txns || 0,
+        total_vertices: 0,
+        total_edges: 0
+    } : null
+    const loadingStats = loadingDashboard || loadingAerospikeStats
     
     // Load options
     const [loadGraph, setLoadGraph] = useState(true)
@@ -150,24 +161,15 @@ const DataManagement = () => {
     const fileInputRef = useRef<HTMLInputElement>(null)
     
     // Historical Transaction Injection state
-    const [injectionLoading, setInjectionLoading] = useState(false)
     const [txnCount, setTxnCount] = useState(10000)
     const [spreadDays, setSpreadDays] = useState(30)
     const [fraudPercentage, setFraudPercentage] = useState(15)
-    const [injectionResult, setInjectionResult] = useState<any>(null)
-    const [injectionProgress, setInjectionProgress] = useState<{
-        current: number
-        total: number
-        percentage: number
-        message: string
-        estimated_remaining_seconds: number | null
-    } | null>(null)
     
     // Delete all data state
     const [deleteLoading, setDeleteLoading] = useState(false)
     const [confirmDelete, setConfirmDelete] = useState(false)
 
-    // ML Detection (moved from Fraud Detection tab)
+    // ML Detection
     const [detectionConfig, setDetectionConfig] = useState<DetectionConfig>({
         schedule_enabled: true,
         schedule_time: '21:30',
@@ -178,60 +180,50 @@ const DataManagement = () => {
     const [detectionHistory, setDetectionHistory] = useState<JobHistoryItem[]>([])
     const [detectionLoading, setDetectionLoading] = useState(true)
     const [saving, setSaving] = useState(false)
-    const [runningDetection, setRunningDetection] = useState(false)
     const [skipCooldown, setSkipCooldown] = useState(false)
     const [historyLoading, setHistoryLoading] = useState(true)
-    const [computingFeatures, setComputingFeatures] = useState(false)
-    const [featureResult, setFeatureResult] = useState<any>(null)
-    const [featureProgress, setFeatureProgress] = useState<{
-        current: number
-        total: number
-        percentage: number
-        message: string
-        estimated_remaining_seconds: number | null
-    } | null>(null)
-    const [detectionProgress, setDetectionProgress] = useState<{
-        current: number
-        total: number
-        percentage: number
-        message: string
-        estimated_remaining_seconds: number | null
-    } | null>(null)
 
-    // Fetch current graph statistics
-    const fetchGraphStats = async () => {
-        setLoadingStats(true)
-        try {
-            const response = await fetch('/api/dashboard/stats')
-            if (response.ok) {
-                const data = await response.json()
-                setGraphStats({
-                    users: data.users || 0,
-                    accounts: 0,
-                    devices: 0,
-                    transactions: data.txns || 0,
-                    total_vertices: 0,
-                    total_edges: 0
-                })
-            }
-        } catch (error) {
-            console.error('Failed to fetch graph stats:', error)
-        } finally {
-            setLoadingStats(false)
-        }
+    // ── Derive running/progress from context (survives page navigation) ──
+    const bulkOp       = opCtx.get('bulk_load')
+    const injectionOp  = opCtx.get('inject_transactions')
+    const featureOp    = opCtx.get('compute_features')
+    const detectionOp  = opCtx.get('ml_detection')
+
+    // Derive bulkLoadStatus: prefer context result when available, else use local
+    const bulkLoadStatus: BulkLoadStatus = bulkOp.result
+        ? {
+            loading: bulkOp.running,
+            success: true,
+            complete: true,
+            message: bulkOp.result.message || 'Bulk load completed successfully',
+            graph: bulkOp.result.graph,
+            aerospike: bulkOp.result.aerospike,
+          }
+        : bulkOp.error
+        ? { loading: false, success: false, error: bulkOp.error }
+        : bulkLoadStatusLocal
+
+    const isLoading         = bulkOp.running
+    const bulkLoadProgress  = bulkOp.progress
+    const injectionLoading  = injectionOp.running
+    const injectionProgress = injectionOp.progress
+    const injectionResult   = injectionOp.result
+    const computingFeatures = featureOp.running
+    const featureProgress   = featureOp.progress
+    const featureResult     = featureOp.result
+    const runningDetection  = detectionOp.running
+    const detectionProgress = detectionOp.progress
+
+    // Refresh stats — revalidate local SWR caches
+    const refreshStats = () => {
+        mutateDashboard()
+        mutateAerospikeStats()
     }
 
-    // Fetch Aerospike stats
-    const fetchAerospikeStats = async () => {
-        try {
-            const response = await fetch('/api/aerospike/stats')
-            if (response.ok) {
-                const data = await response.json()
-                setAerospikeStats(data)
-            }
-        } catch (error) {
-            console.error('Failed to fetch Aerospike stats:', error)
-        }
+    // Invalidate ALL SWR caches app-wide (call after data mutations like inject, bulk load, delete)
+    // This ensures Users, Transactions, Flagged, Dashboard pages all show fresh data on next visit
+    const invalidateAllCaches = () => {
+        globalMutate(() => true, undefined, { revalidate: true })
     }
 
     // Fetch detection config and status
@@ -267,8 +259,6 @@ const DataManagement = () => {
     }
 
     useEffect(() => {
-        fetchGraphStats()
-        fetchAerospikeStats()
         fetchConfig()
         fetchHistory()
     }, [])
@@ -291,14 +281,11 @@ const DataManagement = () => {
             return
         }
 
-        setIsLoading(true)
-        setBulkLoadStatus({ loading: true, message: 'Starting bulk load...' })
-        setBulkLoadProgress({ current: 0, total: 6, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        opCtx.start('bulk_load', { current: 0, total: 6, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        setBulkLoadStatusLocal({ loading: true, message: 'Starting bulk load...' })
         
         // Start polling for progress
-        const progressInterval = setInterval(() => {
-            pollProgress('bulk_load', setBulkLoadProgress)
-        }, 500)
+        opCtx.startPolling('bulk_load', 'bulk_load')
         
         try {
             let response: Response
@@ -333,8 +320,8 @@ const DataManagement = () => {
             const data = await response.json()
             
             if (data.success) {
-                setBulkLoadProgress({ current: 6, total: 6, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
-                setBulkLoadStatus({
+                opCtx.complete('bulk_load', data)
+                setBulkLoadStatusLocal({
                     loading: false,
                     success: true,
                     message: data.message || 'Bulk load completed successfully',
@@ -348,11 +335,12 @@ const DataManagement = () => {
                     pollBulkLoadStatus()
                 }
                 
-                // Refresh stats
-                fetchGraphStats()
-                fetchAerospikeStats()
+                // Refresh all data across the app
+                refreshStats()
+                invalidateAllCaches()
             } else {
-                setBulkLoadStatus({
+                opCtx.fail('bulk_load', data.detail || data.message || 'Failed to start bulk load')
+                setBulkLoadStatusLocal({
                     loading: false,
                     success: false,
                     error: data.detail || data.message || 'Failed to start bulk load',
@@ -362,16 +350,13 @@ const DataManagement = () => {
                 toast.error('Bulk load failed')
             }
         } catch (error) {
-            setBulkLoadStatus({
+            opCtx.fail('bulk_load', 'Network error - failed to connect to backend')
+            setBulkLoadStatusLocal({
                 loading: false,
                 success: false,
                 error: 'Network error - failed to connect to backend'
             })
             toast.error('Failed to connect to backend')
-        } finally {
-            clearInterval(progressInterval)
-            setIsLoading(false)
-            setTimeout(() => setBulkLoadProgress(null), 2000)
         }
     }
 
@@ -385,7 +370,7 @@ const DataManagement = () => {
                 const response = await fetch('/api/bulk-load-status')
                 const data = await response.json()
                 
-                setBulkLoadStatus(prev => ({
+                setBulkLoadStatusLocal(prev => ({
                     ...prev,
                     loading: !data.complete,
                     status: data.status,
@@ -397,10 +382,11 @@ const DataManagement = () => {
                 
                 if (data.complete) {
                     toast.success('Graph bulk load completed!')
-                    fetchGraphStats()
+                    refreshStats()
+                    invalidateAllCaches()
                     return true
                 } else if (data.status?.toLowerCase().includes('failed') || data.status?.toLowerCase().includes('error')) {
-                    setBulkLoadStatus(prev => ({
+                    setBulkLoadStatusLocal(prev => ({
                         ...prev,
                         loading: false,
                         success: false,
@@ -419,7 +405,7 @@ const DataManagement = () => {
         
         const poll = async () => {
             if (attempts >= maxAttempts) {
-                setBulkLoadStatus(prev => ({
+                setBulkLoadStatusLocal(prev => ({
                     ...prev,
                     loading: false,
                     message: 'Bulk load is still running in the background. Click refresh to check status.'
@@ -439,13 +425,12 @@ const DataManagement = () => {
 
     // Check bulk load status manually
     const handleCheckStatus = async () => {
-        setLoadingStats(true)
         try {
             const response = await fetch('/api/bulk-load-status')
             const data = await response.json()
             
             if (data.success) {
-                setBulkLoadStatus(prev => ({
+                setBulkLoadStatusLocal(prev => ({
                     ...prev,
                     loading: !data.complete,
                     success: data.complete,
@@ -463,7 +448,7 @@ const DataManagement = () => {
                     toast.info(`Bulk load ${data.status}: ${data.step || 'processing...'}`)
                 }
             } else {
-                setBulkLoadStatus(prev => ({
+                setBulkLoadStatusLocal(prev => ({
                     ...prev,
                     loading: false,
                     success: false,
@@ -472,46 +457,21 @@ const DataManagement = () => {
                 toast.error(data.error || 'Failed to get status')
             }
             
-            await fetchGraphStats()
-            await fetchAerospikeStats()
+            refreshStats()
+            invalidateAllCaches()
         } catch (error) {
             toast.error('Failed to check status')
-        } finally {
-            setLoadingStats(false)
         }
     }
 
-    // Poll for operation progress
-    const pollProgress = async (operationId: string, setProgress: (p: any) => void): Promise<void> => {
-        try {
-            const response = await fetch(`/api/operation-progress/${operationId}`)
-            if (response.ok) {
-                const data = await response.json()
-                if (data.found) {
-                    setProgress({
-                        current: data.current,
-                        total: data.total,
-                        percentage: data.percentage,
-                        message: data.message,
-                        estimated_remaining_seconds: data.estimated_remaining_seconds
-                    })
-                }
-            }
-        } catch (error) {
-            console.error('Failed to poll progress:', error)
-        }
-    }
+    // pollProgress is now handled by the OperationProgressContext
 
     // Inject historical transactions with fraud patterns
     const handleInjectTransactions = async () => {
-        setInjectionLoading(true)
-        setInjectionResult(null)
-        setInjectionProgress({ current: 0, total: txnCount, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        opCtx.start('inject_transactions', { current: 0, total: txnCount, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
         
         // Start polling for progress
-        const progressInterval = setInterval(() => {
-            pollProgress('inject_transactions', setInjectionProgress)
-        }, 500)
+        opCtx.startPolling('inject_transactions', 'inject_transactions')
         
         try {
             // Use locale committed when bulk load was run (not current dropdown)
@@ -532,8 +492,7 @@ const DataManagement = () => {
             const data = await response.json()
             
             if (data.status === 'completed') {
-                setInjectionResult(data)
-                setInjectionProgress({ current: txnCount, total: txnCount, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
+                opCtx.complete('inject_transactions', data)
                 toast.success(`Injected ${data.normal_transactions + data.fraud_transactions} transactions!`)
                 
                 // Show fraud pattern breakdown
@@ -542,20 +501,17 @@ const DataManagement = () => {
                     toast.info(`Fraud: ${data.fraud_transactions} (rings: ${patterns.fraud_rings}, velocity: ${patterns.velocity_anomalies}, amount: ${patterns.amount_anomalies}, new account: ${patterns.new_account_fraud})`)
                 }
                 
-                // Refresh stats
-                await fetchGraphStats()
-                await fetchAerospikeStats()
+                // Refresh all data across the app
+                refreshStats()
+                invalidateAllCaches()
             } else {
+                opCtx.fail('inject_transactions', data.error || data.detail || 'Failed to inject transactions')
                 toast.error(data.error || data.detail || 'Failed to inject transactions')
             }
         } catch (error) {
             console.error('Failed to inject transactions:', error)
+            opCtx.fail('inject_transactions', 'Failed to inject transactions')
             toast.error('Failed to inject transactions')
-        } finally {
-            clearInterval(progressInterval)
-            setInjectionLoading(false)
-            // Clear progress after a short delay
-            setTimeout(() => setInjectionProgress(null), 2000)
         }
     }
 
@@ -581,11 +537,15 @@ const DataManagement = () => {
             
             if (response.ok) {
                 toast.success('All data deleted successfully!')
-                setInjectionResult(null)
+                // Clear all operation results in context
+                opCtx.complete('inject_transactions', null)
+                opCtx.complete('compute_features', null)
+                opCtx.complete('ml_detection', null)
+                opCtx.complete('bulk_load', null)
                 
-                // Refresh stats
-                await fetchGraphStats()
-                await fetchAerospikeStats()
+                // Refresh all data across the app
+                refreshStats()
+                invalidateAllCaches()
             } else {
                 toast.error(data.detail || data.message || 'Failed to delete data')
             }
@@ -623,60 +583,50 @@ const DataManagement = () => {
 
     // Compute features from KV transactions
     const handleComputeFeatures = async () => {
-        setComputingFeatures(true)
-        setFeatureResult(null)
-        setFeatureProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        opCtx.start('compute_features', { current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
         toast.info(`Computing features with ${detectionConfig.cooldown_days}-day window...`)
-        const progressInterval = setInterval(() => {
-            pollProgress('compute_features', setFeatureProgress)
-        }, 500)
+        opCtx.startPolling('compute_features', 'compute_features')
         try {
             const response = await fetch(`/api/compute-features?window_days=${detectionConfig.cooldown_days}`, { method: 'POST' })
             if (response.ok) {
                 const data = await response.json()
-                setFeatureResult(data)
-                setFeatureProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
+                opCtx.complete('compute_features', data)
                 toast.success(`Features computed! ${data.accounts_processed || 0} accounts, ${data.devices_processed || 0} devices.`)
+                invalidateAllCaches()
             } else {
                 const error = await response.json()
+                opCtx.fail('compute_features', error.detail || 'Feature computation failed')
                 toast.error(error.detail || 'Feature computation failed')
             }
         } catch (error) {
+            opCtx.fail('compute_features', 'Error computing features')
             toast.error('Error computing features')
-        } finally {
-            clearInterval(progressInterval)
-            setComputingFeatures(false)
-            setTimeout(() => setFeatureProgress(null), 2000)
         }
     }
 
     // Run detection manually
     const handleRunDetection = async () => {
-        setRunningDetection(true)
-        setDetectionProgress({ current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
+        opCtx.start('ml_detection', { current: 0, total: 100, percentage: 0, message: 'Starting...', estimated_remaining_seconds: null })
         toast.info(skipCooldown ? 'Starting detection job (skipping cooldown)...' : 'Starting detection job...')
-        const progressInterval = setInterval(() => {
-            pollProgress('ml_detection', setDetectionProgress)
-        }, 500)
+        opCtx.startPolling('ml_detection', 'ml_detection')
         try {
             const url = skipCooldown ? '/api/flagged-accounts/detect?skip_cooldown=true' : '/api/flagged-accounts/detect'
             const response = await fetch(url, { method: 'POST' })
             if (response.ok) {
                 const data = await response.json()
-                setDetectionProgress({ current: 100, total: 100, percentage: 100, message: 'Complete!', estimated_remaining_seconds: null })
+                opCtx.complete('ml_detection', data)
                 toast.success(`Detection completed! ${data.result?.newly_flagged || 0} users flagged.`)
+                invalidateAllCaches()
                 fetchHistory()
                 fetchConfig()
             } else {
                 const error = await response.json()
+                opCtx.fail('ml_detection', error.detail || 'Detection job failed')
                 toast.error(error.detail || 'Detection job failed')
             }
         } catch (error) {
+            opCtx.fail('ml_detection', 'Error running detection job')
             toast.error('Error running detection job')
-        } finally {
-            clearInterval(progressInterval)
-            setRunningDetection(false)
-            setTimeout(() => setDetectionProgress(null), 2000)
         }
     }
 
@@ -755,11 +705,11 @@ const DataManagement = () => {
                                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
                                     <Database className="h-4 w-4 text-primary" />
                                 </div>
-                                Bulk Data Load
-                            </CardTitle>
+                        Bulk Data Load
+                    </CardTitle>
                             <CardDescription className="mt-0.5 text-xs">
                                 Load sample data into Graph DB and/or Aerospike KV.
-                            </CardDescription>
+                    </CardDescription>
                         </div>
                         <Button
                             variant="ghost"
@@ -770,7 +720,7 @@ const DataManagement = () => {
                         >
                             {bulkLoadCardCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
                         </Button>
-                            </CardHeader>
+                </CardHeader>
                 {!bulkLoadCardCollapsed && (
                 <CardContent className="space-y-3 px-4 pb-4 flex-1 flex flex-col">
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -784,7 +734,7 @@ const DataManagement = () => {
                                         setUploadedFile(null)
                                     }}
                                     className={`w-full p-2 rounded-md border transition-all text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                                        useDefaultData
+                                        useDefaultData 
                                             ? 'border-primary bg-primary/5 dark:bg-primary/10'
                                             : 'border-transparent bg-background hover:bg-muted/50'
                                     }`}
@@ -800,7 +750,7 @@ const DataManagement = () => {
                                         fileInputRef.current?.click()
                                     }}
                                     className={`w-full p-2 rounded-md border transition-all text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                                        !useDefaultData
+                                        !useDefaultData 
                                             ? 'border-primary bg-primary/5 dark:bg-primary/10'
                                             : 'border-transparent bg-background hover:bg-muted/50'
                                     }`}
@@ -862,16 +812,16 @@ const DataManagement = () => {
                                 <div className="flex items-center justify-between gap-2">
                                     <Label htmlFor="load-graph" className="text-xs cursor-pointer flex items-center gap-1.5">
                                         <HardDrive className="h-3 w-3 shrink-0 text-blue-500" />Graph
-                                    </Label>
+                                        </Label>
                                     <Switch id="load-graph" checked={loadGraph} onCheckedChange={setLoadGraph} className="scale-75 origin-right" />
-                                </div>
+                                    </div>
                                 <div className={`flex items-center justify-between gap-2 ${!aerospikeStats?.connected ? 'opacity-50' : ''}`}>
                                     <Label htmlFor="load-aerospike" className={`text-xs flex items-center gap-1.5 ${aerospikeStats?.connected ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground'}`}>
                                         <Server className={`h-3 w-3 shrink-0 ${aerospikeStats?.connected ? 'text-green-500' : ''}`} />KV
-                                    </Label>
+                                        </Label>
                                     <Switch id="load-aerospike" checked={aerospikeStats?.connected ? loadAerospike : false} onCheckedChange={setLoadAerospike} disabled={!aerospikeStats?.connected} className="scale-75 origin-right" />
+                                    </div>
                                 </div>
-                            </div>
                         </div>
                     </div>
 
@@ -882,7 +832,7 @@ const DataManagement = () => {
                                 <span className="font-medium text-foreground">Storage</span>
                                 <span className="text-muted-foreground">
                                     Graph: <strong>{loadingStats ? '…' : (graphStats?.users?.toLocaleString() ?? '0')}</strong> users, <strong>{loadingStats ? '…' : (graphStats?.transactions?.toLocaleString() ?? '0')}</strong> txns
-                                </span>
+                                        </span>
                                 <span className="text-muted-foreground">
                                     KV: <strong>{loadingStats ? '…' : (aerospikeStats?.users_count?.toLocaleString() ?? '0')}</strong> users, <strong>{aerospikeStats?.flagged_accounts_count?.toLocaleString() ?? '0'}</strong> flagged
                                     {aerospikeStats?.connected && (
@@ -891,7 +841,7 @@ const DataManagement = () => {
                                 </span>
                             </div>
                             <div className="flex items-center gap-1">
-                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => { fetchGraphStats(); fetchAerospikeStats(); }} disabled={loadingStats}>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={refreshStats} disabled={loadingStats}>
                                     {loadingStats ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                                 </Button>
                                 <Button
@@ -1036,9 +986,9 @@ const DataManagement = () => {
 
                     {/* Actions */}
                     <div className="flex gap-2 mt-auto pt-2">
-                        <Button
+                        <Button 
                             size="sm"
-                            onClick={handleBulkLoad}
+                            onClick={handleBulkLoad} 
                             disabled={isLoading || (!loadGraph && !(aerospikeStats?.connected && loadAerospike)) || (!useDefaultData && !uploadedFile)}
                             className="flex-1"
                         >
@@ -1073,11 +1023,11 @@ const DataManagement = () => {
                             <Badge variant="secondary" className="ml-auto text-xs font-normal text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800">
                                 After 1
                             </Badge>
-                        </CardTitle>
+                    </CardTitle>
                         <CardDescription className="mt-0.5 text-xs">
                             Generate historical txns with fraud patterns → Graph DB & KV.
-                        </CardDescription>
-                    </CardHeader>
+                    </CardDescription>
+                </CardHeader>
                 <CardContent className="space-y-3 px-4 pb-4 flex-1 flex flex-col">
                     {/* Parameters */}
                     <div className="grid grid-cols-3 gap-2">
@@ -1191,7 +1141,7 @@ const DataManagement = () => {
                         <span className="text-blue-500">→</span>
                         <span>4. Review Flagged Accounts tab</span>
                     </div> */}
-
+                    
                     <Button
                         size="sm"
                         onClick={handleInjectTransactions}
@@ -1223,11 +1173,11 @@ const DataManagement = () => {
                                 <Zap className="h-4 w-4 text-muted-foreground" />
                             </div>
                             Run ML detection
-                        </CardTitle>
+                    </CardTitle>
                         <CardDescription className="mt-0.5 text-xs">
                             Requires Aerospike KV for parameters and detection run
-                        </CardDescription>
-                    </CardHeader>
+                    </CardDescription>
+                </CardHeader>
                     <CardContent className="px-4 pb-4">
                         <div className="p-4 rounded-lg bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800">
                             <div className="flex items-start gap-3">
@@ -1239,17 +1189,17 @@ const DataManagement = () => {
                                     <p className="text-xs text-red-700 dark:text-red-400 mt-1">
                                         Connect Aerospike KV to use detection parameters and run ML.
                                     </p>
-                                    <Button variant="outline" size="sm" className="mt-2" onClick={fetchAerospikeStats}>
+                                    <Button variant="outline" size="sm" className="mt-2" onClick={() => mutateAerospikeStats()}>
                                         <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
                                         Check connection
                                     </Button>
-                                </div>
-                            </div>
                         </div>
+                        </div>
+                    </div>
                     </CardContent>
                 </Card>
-            ) : (
-                <>
+                            ) : (
+                                <>
                     <div className="grid gap-6 md:grid-cols-2 md:col-span-2">
                         {/* LEFT: Compute features (Step 1) – equal height */}
                         <Card className="overflow-hidden border border-purple-200/70 dark:border-purple-800/70 shadow-sm h-full flex flex-col">
@@ -1286,14 +1236,14 @@ const DataManagement = () => {
                                         <div className="p-2.5 rounded-lg border border-purple-200/80 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/20 space-y-1">
                                             <div className="flex justify-between text-xs"><span className="font-medium text-purple-800 dark:text-purple-200">{featureProgress.message}</span><span className="tabular-nums text-purple-600 dark:text-purple-400">{featureProgress.percentage}%</span></div>
                                             <div className="h-2 bg-purple-100 dark:bg-purple-900/50 rounded-full overflow-hidden"><div className="h-full bg-purple-500 transition-all duration-300 rounded-full" style={{ width: `${featureProgress.percentage}%` }} /></div>
-                                        </div>
+                    </div>
                                     )}
                                 </div>
                                 <Button size="sm" onClick={handleComputeFeatures} disabled={computingFeatures} className="w-full bg-purple-600 hover:bg-purple-700 text-white shrink-0 mt-auto">
                                     {computingFeatures ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{featureProgress ? `${featureProgress.percentage}%` : 'Starting…'}</> : <><TrendingUp className="h-3.5 w-3.5 mr-1.5" />Compute features ({detectionConfig.cooldown_days}d window)</>}
                                 </Button>
-                            </CardContent>
-                        </Card>
+                </CardContent>
+            </Card>
 
                         {/* RIGHT: Run ML detection (Step 2) – equal height, compact */}
                         <Card className="overflow-hidden border-0 shadow-sm h-full flex flex-col">
@@ -1304,9 +1254,9 @@ const DataManagement = () => {
                                     </div>
                                     Run ML detection
                                     <Badge variant="secondary" className="ml-auto text-xs font-normal text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800">Step 2</Badge>
-                                </CardTitle>
+                    </CardTitle>
                                 <CardDescription className="mt-0.5 text-xs">Set parameters and run detection to flag accounts</CardDescription>
-                            </CardHeader>
+                </CardHeader>
                             <CardContent className="px-4 pb-4 flex-1 flex flex-col gap-2.5 min-h-0">
                                 {/* Parameters: one compact row */}
                                 <div className="rounded-lg border border-border/80 bg-muted/30 p-2.5 space-y-2 shrink-0">
@@ -1314,20 +1264,20 @@ const DataManagement = () => {
                                         <div className="space-y-0.5">
                                             <Label className="text-xs font-medium">Cooldown (d)</Label>
                                             <Input type="number" min={1} max={90} value={detectionConfig.cooldown_days} onChange={(e) => setDetectionConfig(prev => ({ ...prev, cooldown_days: parseInt(e.target.value) || 7 }))} className="h-7 w-14 text-xs" />
-                                        </div>
+                                </div>
                                         <div className="flex-1 min-w-[100px] space-y-0.5">
                                             <Label className="text-xs font-medium">Risk: {detectionConfig.risk_threshold}</Label>
                                             <Slider value={[detectionConfig.risk_threshold]} onValueChange={([value]) => setDetectionConfig(prev => ({ ...prev, risk_threshold: value }))} min={0} max={100} step={5} className="w-full" />
-                                        </div>
+                                </div>
                                         <Button size="sm" variant="outline" onClick={handleSaveConfig} disabled={saving} className="h-7 shrink-0">
                                             {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle className="h-3 w-3" />}
                                         </Button>
-                                    </div>
+                            </div>
                                 </div>
                                 {schedulerStatus?.detection_job_running && (
                                     <div className="p-1.5 rounded-lg bg-blue-50/80 dark:bg-blue-950/20 border border-blue-200/80 flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300 shrink-0">
                                         <Loader2 className="h-3 w-3 animate-spin shrink-0" />Detection run in progress…
-                                    </div>
+                                </div>
                                 )}
                                 <div className="flex items-center justify-between p-2 bg-muted/30 rounded-lg border gap-2 shrink-0">
                                     <Label className="text-xs font-medium">Skip cooldown</Label>
@@ -1337,18 +1287,18 @@ const DataManagement = () => {
                                     <div className="p-2 rounded-lg bg-blue-50/80 dark:bg-blue-950/20 border border-blue-200/80 dark:border-blue-800/80 space-y-1 shrink-0">
                                         <div className="flex justify-between text-xs"><span className="font-medium text-blue-800 dark:text-blue-200">{detectionProgress.message}</span><span className="tabular-nums text-blue-600 dark:text-blue-400">{detectionProgress.percentage}%</span></div>
                                         <div className="h-2 bg-blue-100 dark:bg-blue-900/50 rounded-full overflow-hidden"><div className="h-full bg-blue-500 transition-all duration-300 rounded-full" style={{ width: `${detectionProgress.percentage}%` }} /></div>
-                                    </div>
-                                )}
+                        </div>
+                    )}
                                 <div className="flex gap-2 mt-auto pt-1 shrink-0">
                                     <Button size="sm" onClick={handleRunDetection} disabled={runningDetection || schedulerStatus?.detection_job_running} className="flex-1">
                                         {runningDetection || schedulerStatus?.detection_job_running ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />{detectionProgress ? `${detectionProgress.percentage}%` : 'Starting...'}</> : <><Play className="h-3.5 w-3.5 mr-1.5" />Run detection now</>}
                                     </Button>
                                     <Button size="sm" variant="outline" onClick={() => { fetchConfig(); fetchHistory(); }}>
                                         <RefreshCw className="h-3.5 w-3.5" />
-                                    </Button>
-                                </div>
-                            </CardContent>
-                        </Card>
+                        </Button>
+                    </div>
+                </CardContent>
+            </Card>
                     </div>
 
                     <Card className="md:col-span-2 overflow-hidden border-0 shadow-sm">
@@ -1358,16 +1308,16 @@ const DataManagement = () => {
                                     <History className="h-4 w-4 text-muted-foreground" />
                                 </div>
                                 Detection history
-                            </CardTitle>
+                    </CardTitle>
                             <CardDescription className="mt-0.5 text-xs">Recent detection runs and results</CardDescription>
-                        </CardHeader>
+                </CardHeader>
                         <CardContent className="px-4 pb-4">
                             {historyLoading ? (
                                 <div className="space-y-2">
                                     {[...Array(3)].map((_, i) => (
                                         <Skeleton key={i} className="h-12 w-full" />
                                     ))}
-                                </div>
+                    </div>
                             ) : detectionHistory.length === 0 ? (
                                 <div className="text-center py-8 text-muted-foreground">
                                     <History className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -1437,8 +1387,8 @@ const DataManagement = () => {
                                     </Table>
                                 </div>
                             )}
-                        </CardContent>
-                    </Card>
+                </CardContent>
+            </Card>
                 </>
             )}
             </section>

@@ -3,6 +3,8 @@ import { Inter } from 'next/font/google'
 import './globals.css'
 import Navbar from '@/components/Navbar'
 import { Toaster } from "@/components/ui/sonner"
+import { OperationProgressProvider } from '@/context/OperationProgressContext'
+import { SWRProvider } from '@/lib/swr'
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -19,13 +21,17 @@ export default function RootLayout({
   	return (
     	<html lang="en" suppressHydrationWarning>
       		<body className={inter.className}>
-        		<div className="min-h-screen bg-background flex flex-col">
-          			<Navbar />
-					<main className="container relative mx-auto px-4 py-8 flex flex-col grow">
-						{children}
-					</main>
-				</div>
-				<Toaster richColors />
+			<SWRProvider>
+				<OperationProgressProvider>
+					<div className="min-h-screen bg-background flex flex-col">
+						<Navbar />
+						<main className="container relative mx-auto px-4 py-8 flex flex-col grow">
+							{children}
+						</main>
+					</div>
+					<Toaster richColors />
+				</OperationProgressProvider>
+			</SWRProvider>
       		</body>
     	</html>
   	)

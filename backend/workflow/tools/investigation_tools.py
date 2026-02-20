@@ -338,7 +338,7 @@ class InvestigationTools:
                 "occupation": user_data.get("occupation", "Unknown"),
                 "signup_date": signup_date,
                 "account_age_days": account_age_days,
-                "risk_score": user_data.get("curr_risk", 0),
+                "risk_score": user_data.get("risk_score", 0),
                 "accounts": account_list,
                 "account_count": len(account_list),
                 "total_balance": round(total_balance, 2),

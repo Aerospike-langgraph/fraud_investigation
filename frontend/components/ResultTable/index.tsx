@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import Link from 'next/link'
@@ -12,6 +12,7 @@ import Search from './Search'
 import { type LabelProps } from '../Label'
 import { Skeleton } from '../ui/skeleton'
 import TableData from './TableData'
+import useSWR from 'swr'
 
 export interface Option {
     name: string
@@ -32,41 +33,34 @@ interface SearchResult {
 }
 
 interface Props {
-    handleSearch: (page: number, size: number, orderBy: string, order: 'asc' | 'desc', query?: string) => Promise<SearchResult>
+    apiUrl: string
     title: string
     options: Option[]
 }
 
 const Results = ({ 
-    handleSearch,
+    apiUrl,
     title,
     options
 }: Props) => {
     const pathname = usePathname();
     const [currentPage, setCurrentPage] = useState(1)
     const [pageSize, setPageSize] = useState(10)
-    const [totalPages, setTotalPages] = useState<number>(0)
-    const [totalEntries, setTotalEntries] = useState<number>(0)
     const [orderBy, setOrderBy] = useState<string>(options.filter(opt => opt.defaultSort)[0]?.item ?? options.find(opt => opt.sortable)?.item ?? "")
     const [order, setOrder] = useState<'asc' | 'desc'>(options.filter(opt => opt.defaultSort)[0]?.defaultOrder ?? 'asc')
-    const [results, setResults] = useState<Record<string, any>[]>([])
-    const [loading, setLoading] = useState(true)
-    const loaded = useRef(false)
+    const [query, setQuery] = useState<string | undefined>(undefined)
 
-    const fetchData = async (
-        page: number = currentPage,
-        size: number = pageSize, 
-        oB: string = orderBy,
-        o: 'asc' | 'desc' = order,
-        q?: string
-    ) => {
-        setLoading(true);
-        const search = await handleSearch(page, size, oB, o, q)
-        setResults(search.result)
-        setTotalPages(search.total_pages)
-        setTotalEntries(search.total)
-        setTimeout(() => setLoading(false), 300)
-    }
+    // Build the SWR cache key from all params — when any param changes, SWR auto-refetches
+    const swrKey = `${apiUrl}?page=${currentPage}&page_size=${pageSize}&order_by=${orderBy}&order=${order}${query ? `&query=${query}` : ''}`
+
+    const { data, isLoading, isValidating } = useSWR<SearchResult>(swrKey, {
+        keepPreviousData: true, // Show old data while fetching new page
+    })
+
+    const results = data?.result ?? []
+    const totalPages = data?.total_pages ?? 0
+    const totalEntries = data?.total ?? 0
+    const loading = isLoading
 
     const handleSort = (key: string) => {
         if(loading) return
@@ -74,34 +68,29 @@ const Results = ({
         if(orderBy === key) o = order === 'asc' ? 'desc' : 'asc'        
         setOrderBy(key)
         setOrder(o)
-        fetchData(currentPage, pageSize, key, o)
     }
 
     const handlePageSize = (size: number) => {
         if(loading) return
         setPageSize(size)
-        fetchData(currentPage, size)
     }
 
     const handlePagination = (page: number) => {
         if(loading) return
         setCurrentPage(page)
-        fetchData(page)
     }
 
-    useEffect(() => {
-        if(!loaded.current) {
-            fetchData()
-            loaded.current = true
-        }
-    }, [])
+    const handleSearch = (q?: string) => {
+        setQuery(q || undefined)
+        setCurrentPage(1)
+    }
 
     return (
         <Card className='grow flex flex-col'>
             <CardHeader className='gap-4'>
                 <CardTitle>{title}</CardTitle>
                 <Search
-                    fetchData={(q) => fetchData(currentPage, pageSize, orderBy, order, q)}
+                    fetchData={handleSearch}
                     placeholder={`Search ${title}`}
                     setCurrentPage={() => setCurrentPage(1)} />
             </CardHeader>

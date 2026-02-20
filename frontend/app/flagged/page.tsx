@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,6 +23,7 @@ import {
     CheckCircle,
     XCircle
 } from 'lucide-react'
+import useSWR from 'swr'
 
 interface FlaggedAccount {
     account_id: string
@@ -52,6 +53,12 @@ interface FlaggedStats {
     total_flagged_amount: number
 }
 
+interface FlaggedResponse {
+    accounts: FlaggedAccount[]
+    total: number
+    total_pages: number
+}
+
 const statusConfig = {
     pending_review: { 
         label: 'Pending Review', 
@@ -78,79 +85,29 @@ const statusConfig = {
 export default function FlaggedAccountsPage() {
     const [filter, setFilter] = useState<'all' | 'pending_review' | 'under_investigation'>('all')
     const [searchQuery, setSearchQuery] = useState('')
-    const [accounts, setAccounts] = useState<FlaggedAccount[]>([])
-    const [stats, setStats] = useState<FlaggedStats | null>(null)
-    const [loading, setLoading] = useState(true)
-    const [statsLoading, setStatsLoading] = useState(true)
+    const [debouncedSearch, setDebouncedSearch] = useState('')
     const [page, setPage] = useState(1)
-    const [totalPages, setTotalPages] = useState(1)
-    const [total, setTotal] = useState(0)
     const pageSize = 20
 
-    const fetchAccounts = useCallback(async () => {
-        setLoading(true)
-        try {
-            const params = new URLSearchParams({
-                page: page.toString(),
-                page_size: pageSize.toString()
-            })
-            
-            if (filter !== 'all') {
-                params.append('status', filter)
-            }
-            if (searchQuery) {
-                params.append('search', searchQuery)
-            }
+    // Build SWR key for accounts list
+    const accountsParams = new URLSearchParams({
+        page: page.toString(),
+        page_size: pageSize.toString()
+    })
+    if (filter !== 'all') accountsParams.append('status', filter)
+    if (debouncedSearch) accountsParams.append('search', debouncedSearch)
 
-            const response = await fetch(`/api/flagged-accounts?${params}`)
-            if (response.ok) {
-                const data = await response.json()
-                setAccounts(data.accounts || [])
-                setTotal(data.total || 0)
-                setTotalPages(data.total_pages || 1)
-            } else {
-                console.error('Failed to fetch flagged accounts')
-                setAccounts([])
-            }
-        } catch (error) {
-            console.error('Error fetching flagged accounts:', error)
-            setAccounts([])
-        } finally {
-            setLoading(false)
-        }
-    }, [page, filter, searchQuery])
+    const { data: accountsData, isLoading: loading, mutate: mutateAccounts } = useSWR<FlaggedResponse>(
+        `/api/flagged-accounts?${accountsParams}`,
+        { keepPreviousData: true }
+    )
+    const { data: stats, isLoading: statsLoading, mutate: mutateStats } = useSWR<FlaggedStats>(
+        '/api/flagged-accounts/stats'
+    )
 
-    const fetchStats = async () => {
-        setStatsLoading(true)
-        try {
-            const response = await fetch('/api/flagged-accounts/stats')
-            if (response.ok) {
-                const data = await response.json()
-                setStats(data)
-            }
-        } catch (error) {
-            console.error('Error fetching stats:', error)
-        } finally {
-            setStatsLoading(false)
-        }
-    }
-
-    useEffect(() => {
-        fetchAccounts()
-    }, [fetchAccounts])
-
-    useEffect(() => {
-        fetchStats()
-    }, [])
-
-    // Debounce search
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setPage(1)
-            fetchAccounts()
-        }, 300)
-        return () => clearTimeout(timer)
-    }, [searchQuery])
+    const accounts = accountsData?.accounts ?? []
+    const total = accountsData?.total ?? 0
+    const totalPages = accountsData?.total_pages ?? 1
 
     const handleFilterChange = (newFilter: typeof filter) => {
         setFilter(newFilter)
@@ -158,8 +115,19 @@ export default function FlaggedAccountsPage() {
     }
 
     const handleRefresh = () => {
-        fetchAccounts()
-        fetchStats()
+        mutateAccounts()
+        mutateStats()
+    }
+
+    // Debounce search
+    const handleSearchChange = (value: string) => {
+        setSearchQuery(value)
+        // Debounce the actual SWR key update
+        const timer = setTimeout(() => {
+            setDebouncedSearch(value)
+            setPage(1)
+        }, 300)
+        return () => clearTimeout(timer)
     }
 
     return (
@@ -261,7 +229,7 @@ export default function FlaggedAccountsPage() {
                                 placeholder="Search by account holder or ID..."
                                 className="pl-9"
                                 value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onChange={(e) => handleSearchChange(e.target.value)}
                             />
                         </div>
                     </div>

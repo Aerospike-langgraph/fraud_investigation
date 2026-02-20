@@ -122,7 +122,7 @@ const PerformanceMetricsPanel = ({ metrics }: PerformanceMetricsPanelProps) => {
                             <div className="flex items-center justify-between py-2 px-3 bg-purple-50/60 rounded-lg">
                                 <div className="flex items-center gap-2">
                                     <Cpu className="w-3.5 h-3.5 text-purple-500" />
-                                    <span className="text-sm font-medium text-purple-700">LLM (Ollama)</span>
+                                    <span className="text-sm font-medium text-purple-700">LLM</span>
                                 </div>
                                 <div className="flex items-center gap-4 text-sm">
                                     <span className="text-purple-600 font-semibold">{metrics.llm_calls} calls</span>

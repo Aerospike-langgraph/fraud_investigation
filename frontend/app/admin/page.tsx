@@ -9,7 +9,7 @@ import DataManagement from '@/components/Admin/DataManagement'
 import FraudDetection from '@/components/Admin/FraudDetection'
 
 export default function AdminPage() {
-	const [active, setActive] = useState('generation');
+	const [active, setActive] = useState('data');
 	const [isGenerating, setIsGenerating] = useState(false);
 	
 	return (
@@ -46,18 +46,18 @@ export default function AdminPage() {
 						<span>Performance</span>
 					</TabsTrigger>
 				</TabsList>
-				<TabsContent value="generation" className="space-y-4">
-					<Generation isGenerating={isGenerating} setIsGenerating={setIsGenerating} />
-				</TabsContent>
-				<TabsContent value="fraud-detection" className="space-y-4">
-					<FraudDetection />
-				</TabsContent>
-				<TabsContent value="data" className="space-y-4">
-					<DataManagement />
-				</TabsContent>
-				<TabsContent value="performance" className="space-y-4">
-					<Performance />                
-				</TabsContent>
+			<TabsContent forceMount value="data" className={`space-y-4 ${active !== 'data' ? 'hidden' : ''}`}>
+				<DataManagement />
+			</TabsContent>
+			<TabsContent forceMount value="generation" className={`space-y-4 ${active !== 'generation' ? 'hidden' : ''}`}>
+				<Generation isGenerating={isGenerating} setIsGenerating={setIsGenerating} />
+			</TabsContent>
+			<TabsContent forceMount value="fraud-detection" className={`space-y-4 ${active !== 'fraud-detection' ? 'hidden' : ''}`}>
+				<FraudDetection />
+			</TabsContent>
+			<TabsContent forceMount value="performance" className={`space-y-4 ${active !== 'performance' ? 'hidden' : ''}`}>
+				<Performance />                
+			</TabsContent>
 			</Tabs>
     	</div>
   	)

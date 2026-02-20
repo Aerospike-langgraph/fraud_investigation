@@ -25,7 +25,6 @@ from services.flagged_account_service import FlaggedAccountService
 from services.scheduler_service import scheduler_service
 from services.aerospike_service import aerospike_service
 from services.investigation_service import InvestigationService
-from services.gremlin_loader import GremlinDataLoader
 from services.feature_service import FeatureService
 from services.transaction_injector import TransactionInjector
 from services.progress_service import progress_service
@@ -198,9 +197,9 @@ def get_operation_progress(operation_id: str = Path(..., description="Operation 
 
 @app.get("/dashboard/stats")
 def get_dashboard_stats():
-    """Get dashboard statistics"""
+    """Get dashboard statistics from KV store"""
     try:
-        return graph_service.get_dashboard_stats()
+        return aerospike_service.get_dashboard_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get dashboard stats: {str(e)}")
 
@@ -245,7 +244,7 @@ def get_user(user_id: str):
             raise HTTPException(status_code=404, detail="User not found")
         
         # Calculate risk level from risk score
-        risk_score = user.get('risk_score', 0) or user.get('curr_risk', 0) or 0
+        risk_score = user.get('risk_score', 0) or 0
         if risk_score < 25:
             risk_level = "LOW"
         elif risk_score < 50:
@@ -1044,57 +1043,6 @@ def get_bulk_load_status():
         raise HTTPException(status_code=500, detail=f"Failed to get bulk load status: {str(e)}")
 
 
-@app.post("/bulk-load-gremlin")
-def bulk_load_gremlin_data(
-    vertices_path: Optional[str] = None,
-    edges_path: Optional[str] = None,
-    sync_kv: bool = True
-):
-    """
-    Load data using Gremlin queries (bypasses buggy Aerospike Graph bulk loader).
-    
-    This method:
-    - Loads vertices and edges to graph with correct labels
-    - Drops fraud_flag on load (flags are computed by ML)
-    - Syncs data to KV store (users with nested accounts/devices maps)
-    """
-    result = {
-        "success": True,
-        "graph": None,
-        "kv_sync": None,
-        "message": ""
-    }
-    
-    try:
-        # Default paths
-        if not vertices_path:
-            vertices_path = "/data/graph_csv/vertices"
-        if not edges_path:
-            edges_path = "/data/graph_csv/edges"
-        
-        # Use Gremlin loader with KV sync
-        kv_service = aerospike_service if aerospike_service.is_connected() else None
-        loader = GremlinDataLoader(graph_service, kv_service)
-        graph_result = loader.load_all_data(vertices_path, edges_path, sync_kv=sync_kv)
-        result["graph"] = graph_result
-        result["kv_sync"] = graph_result.get("kv_sync")
-        
-        if not graph_result["success"]:
-            result["success"] = False
-            result["message"] = f"Gremlin load failed: {graph_result.get('errors', [])}"
-        
-        # Build message
-        if result["success"]:
-            v = graph_result.get("vertices", {})
-            kv = graph_result.get("kv_sync", {})
-            result["message"] = (f"Graph: {v.get('users', 0)} users, {v.get('accounts', 0)} accounts, "
-                               f"{v.get('devices', 0)} devices. KV: {kv.get('users', 0)} users synced.")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Gremlin bulk load failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to load data: {str(e)}")
 
 
 @app.post("/inject-historical-transactions")

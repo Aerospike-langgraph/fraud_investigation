@@ -1,9 +1,6 @@
-'use server'
-
 import Main from "@/components/Main"
-import { Suspense } from "react"
 
-export default async function Dashboard() {
+export default function Dashboard() {
   	return (
     	<div className="space-y-6">
       		<div className="flex justify-between items-center">
@@ -12,9 +9,7 @@ export default async function Dashboard() {
           			<p className="text-muted-foreground">Real-time fraud detection overview</p>
         		</div>
       		</div>
-			<Suspense fallback={<Main loading />}>
-				<Main />
-			</Suspense>
+			<Main />
     	</div>
   	)
-} 
+}
