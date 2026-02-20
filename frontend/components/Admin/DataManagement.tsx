@@ -45,12 +45,11 @@ import {
     ChevronUp
 } from 'lucide-react'
 import { toast } from 'sonner'
-<<<<<<< HEAD
+
 import { setDisplayLocale, getDisplayLocale, formatCurrencyWithLocale } from '@/lib/utils'
-=======
+
 import { useOperationProgress } from '@/context/OperationProgressContext'
 import useSWR, { useSWRConfig } from 'swr'
->>>>>>> 0b07d9b (Resolved all issues and changes)
 
 interface BulkLoadStatus {
     loading: boolean

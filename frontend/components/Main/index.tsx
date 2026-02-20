@@ -41,12 +41,9 @@ export default function Main() {
                 color='destructive' />
             <AmountStat 
                 title='Total Amount'
-<<<<<<< HEAD
+
                 amount={stats?.amount}
                 loading={!stats}
-=======
-                {...!isLoading && stats ? { stat: `$${stats?.amount?.toLocaleString('en-US')}` || 0} : { loading: true }}
->>>>>>> 0b07d9b (Resolved all issues and changes)
                 subtitle='Total transaction volume' 
                 icon='trending-up'
                 color='green-600' />
