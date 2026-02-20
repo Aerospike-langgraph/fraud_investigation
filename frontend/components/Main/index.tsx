@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Activity, Shield } from 'lucide-react'
 import Stat from '@/components/Stat'
+import AmountStat from '@/components/AmountStat'
 import { Skeleton } from '../ui/skeleton'
 
 interface DashboardStats {
@@ -43,9 +44,10 @@ export default async function Main({ loading }: { loading?: boolean }) {
                 subtitle='Suspicious transactions detected' 
                 icon='alert-triangle'
                 color='destructive' />
-            <Stat 
+            <AmountStat 
                 title='Total Amount'
-                {...stats ? { stat: `$${stats?.amount?.toLocaleString('en-US')}` || 0} : { loading: true }}
+                amount={stats?.amount}
+                loading={!stats}
                 subtitle='Total transaction volume' 
                 icon='trending-up'
                 color='green-600' />

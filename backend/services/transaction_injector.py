@@ -30,6 +30,43 @@ from services.progress_service import progress_service
 
 logger = logging.getLogger('fraud_detection.transaction_injector')
 
+# Regional transaction locations and currency (aligned with Data Management locale)
+REGIONAL_TXN_LOCATIONS = {
+    'american': [
+        'New York, NY', 'Los Angeles, CA', 'Chicago, IL', 'Houston, TX', 'Phoenix, AZ',
+        'Philadelphia, PA', 'San Antonio, TX', 'San Diego, CA', 'Dallas, TX', 'San Jose, CA',
+        'Austin, TX', 'Jacksonville, FL', 'Fort Worth, TX', 'Columbus, OH', 'Charlotte, NC',
+        'San Francisco, CA', 'Indianapolis, IN', 'Seattle, WA', 'Denver, CO', 'Washington, DC',
+    ],
+    'indian': [
+        'Mumbai', 'Delhi', 'Bengaluru', 'Hyderabad', 'Ahmedabad', 'Chennai', 'Kolkata',
+        'Pune', 'Jaipur', 'Lucknow', 'Kanpur', 'Nagpur', 'Indore', 'Thane', 'Bhopal',
+        'Visakhapatnam', 'Patna', 'Vadodara', 'Ghaziabad', 'Ludhiana', 'Agra', 'Nashik',
+    ],
+    'en_GB': [
+        'London', 'Manchester', 'Birmingham', 'Edinburgh', 'Glasgow', 'Liverpool', 'Leeds',
+        'Bristol', 'Sheffield', 'Newcastle', 'Cardiff', 'Belfast', 'Nottingham', 'Southampton',
+        'Brighton', 'Leicester', 'Coventry', 'Hull', 'Bradford', 'Portsmouth',
+    ],
+    'en_AU': [
+        'Sydney', 'Melbourne', 'Brisbane', 'Perth', 'Adelaide', 'Gold Coast', 'Newcastle',
+        'Canberra', 'Sunshine Coast', 'Wollongong', 'Hobart', 'Geelong', 'Townsville',
+        'Cairns', 'Darwin', 'Toowoomba', 'Ballarat', 'Bendigo', 'Launceston',
+    ],
+    'zh_CN': [
+        'Beijing', 'Shanghai', 'Guangzhou', 'Shenzhen', 'Hangzhou', 'Chengdu', 'Wuhan',
+        "Xi'an", 'Tianjin', 'Nanjing', 'Suzhou', 'Zhengzhou', 'Changsha', 'Shenyang',
+        'Qingdao', 'Dalian', 'Ningbo', 'Xiamen', 'Kunming', 'Hefei',
+    ],
+}
+REGIONAL_CURRENCY = {
+    'american': 'USD',
+    'indian': 'INR',
+    'en_GB': 'GBP',
+    'en_AU': 'AUD',
+    'zh_CN': 'CNY',
+}
+
 
 class TransactionInjector:
     """
@@ -82,7 +119,21 @@ class TransactionInjector:
             if account_id not in self._balance_locks:
                 self._balance_locks[account_id] = threading.Lock()
             return self._balance_locks[account_id]
-    
+
+    def _get_locations_and_currency(self, locale: Optional[str]) -> Tuple[List[str], str]:
+        """Return (locations_list, currency_code) for the given locale. Defaults to American."""
+        if locale and locale in REGIONAL_TXN_LOCATIONS and locale in REGIONAL_CURRENCY:
+            return (REGIONAL_TXN_LOCATIONS[locale], REGIONAL_CURRENCY[locale])
+        return (self.locations, 'USD')
+
+    def _run_locations(self) -> List[str]:
+        """Locations for the current inject run (set at start of inject_*)."""
+        return getattr(self, '_current_locations', None) or self.locations
+
+    def _run_currency(self) -> str:
+        """Currency for the current inject run."""
+        return getattr(self, '_current_currency', None) or 'USD'
+
     def _process_single_transaction(self, txn: dict, account_to_user: dict) -> dict:
         """
         Process a single transaction: create Graph edge + update balances.
@@ -106,7 +157,7 @@ class TransactionInjector:
                 .to(__.V(receiver)) \
                 .property("txn_id", txn.get('txn_id', '')) \
                 .property("amount", txn.get('amount', 0)) \
-                .property("currency", txn.get('currency', 'USD')) \
+                .property("currency", txn.get('currency', self._run_currency())) \
                 .property("type", txn.get('type', 'transfer')) \
                 .property("method", txn.get('method', 'electronic_transfer')) \
                 .property("location", txn.get('location', '')) \
@@ -176,7 +227,7 @@ class TransactionInjector:
                 amount = random.uniform(2000, 15000)
                 timestamp = self._generate_timestamp(spread_days)
                 txn_id = str(uuid.uuid4())
-                location = random.choice(self.locations)
+                location = random.choice(self._run_locations())
                 txn_type = random.choice(self.txn_types)
                 
                 sender_user = account_to_user.get(sender, '')
@@ -193,7 +244,7 @@ class TransactionInjector:
                         'receiver_account_id': receiver,
                         'txn_id': txn_id,
                         'amount': round(amount, 2),
-                        'currency': 'USD',
+                        'currency': self._run_currency(),
                         'type': txn_type,
                         'method': 'electronic_transfer',
                         'location': location,
@@ -268,7 +319,7 @@ class TransactionInjector:
                 dt = datetime.now() - timedelta(days=burst_day, hours=random.randint(0, 23), minutes=random.randint(0, 59))
                 timestamp = dt.isoformat()
                 txn_id = str(uuid.uuid4())
-                location = random.choice(self.locations)
+                location = random.choice(self._run_locations())
                 txn_type = 'transfer'
                 
                 sender_user = account_to_user.get(anomaly_account, '')
@@ -285,7 +336,7 @@ class TransactionInjector:
                         'receiver_account_id': receiver,
                         'txn_id': txn_id,
                         'amount': round(amount, 2),
-                        'currency': 'USD',
+                        'currency': self._run_currency(),
                         'type': txn_type,
                         'method': 'electronic_transfer',
                         'location': location,
@@ -358,7 +409,7 @@ class TransactionInjector:
             
             timestamp = self._generate_timestamp(spread_days)
             txn_id = str(uuid.uuid4())
-            location = random.choice(self.locations)
+            location = random.choice(self._run_locations())
             txn_type = 'transfer'
             
             sender_user = account_to_user.get(sender, '')
@@ -375,7 +426,7 @@ class TransactionInjector:
                     'receiver_account_id': receiver,
                     'txn_id': txn_id,
                     'amount': round(amount, 2),
-                    'currency': 'USD',
+                    'currency': self._run_currency(),
                     'type': txn_type,
                     'method': 'electronic_transfer',
                     'location': location,
@@ -447,7 +498,7 @@ class TransactionInjector:
                 dt = datetime.now() - timedelta(days=random.randint(0, 2), hours=random.randint(0, 23))
                 timestamp = dt.isoformat()
                 txn_id = str(uuid.uuid4())
-                location = random.choice(self.locations)
+                location = random.choice(self._run_locations())
                 txn_type = 'transfer'
                 
                 sender_user = account_to_user.get(new_account, '')
@@ -464,7 +515,7 @@ class TransactionInjector:
                         'receiver_account_id': receiver,
                         'txn_id': txn_id,
                         'amount': round(amount, 2),
-                        'currency': 'USD',
+                        'currency': self._run_currency(),
                         'type': txn_type,
                         'method': 'electronic_transfer',
                         'location': location,
@@ -516,7 +567,8 @@ class TransactionInjector:
         self,
         transaction_count: int = 10000,
         spread_days: int = 30,
-        fraud_percentage: float = 0.15
+        fraud_percentage: float = 0.15,
+        locale: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Inject historical transactions with fraud patterns.
@@ -525,11 +577,13 @@ class TransactionInjector:
             transaction_count: Total number of transactions to generate
             spread_days: Days to spread transactions over (should cover cooldown)
             fraud_percentage: Percentage of fraudulent transactions (default 15%)
+            locale: Demographics region for locations/currency (american, indian, en_GB, en_AU, zh_CN)
             
         Returns:
             Result dict with counts and details
         """
         start_time = datetime.now()
+        self._current_locations, self._current_currency = self._get_locations_and_currency(locale)
         
         # Initialize progress tracking
         self._current_progress = 0
@@ -628,7 +682,8 @@ class TransactionInjector:
         self,
         transaction_count: int = 10000,
         spread_days: int = 30,
-        fraud_percentage: float = 0.15
+        fraud_percentage: float = 0.15,
+        locale: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Bulk inject transactions using CSV + native bulk loader for Graph,
@@ -644,11 +699,17 @@ class TransactionInjector:
             transaction_count: Total number of transactions to generate
             spread_days: Days to spread transactions over
             fraud_percentage: Percentage of fraudulent transactions (default 15%)
+            locale: Demographics region for locations/currency (american, indian, en_GB, en_AU, zh_CN)
             
         Returns:
             Result dict with counts and details
         """
         start_time = datetime.now()
+        self._current_locations, self._current_currency = self._get_locations_and_currency(locale)
+        logger.info(
+            f"Bulk inject locale={locale!r} -> currency={self._current_currency}, "
+            f"locations_sample={self._current_locations[:3] if self._current_locations else []}"
+        )
         
         # Initialize progress tracking
         self._current_progress = 0
@@ -708,7 +769,7 @@ class TransactionInjector:
                 amount = random.uniform(50, 5000)
                 timestamp = self._generate_timestamp(spread_days)
                 txn_id = str(uuid.uuid4())
-                location = random.choice(self.locations)
+                location = random.choice(self._run_locations())
                 txn_type = random.choice(self.txn_types)
                 
                 sender_user = account_to_user.get(sender, '')
@@ -725,7 +786,7 @@ class TransactionInjector:
                     'receiver_account_id': receiver,
                     'txn_id': txn_id,
                     'amount': round(amount, 2),
-                    'currency': 'USD',
+                    'currency': self._run_currency(),
                     'type': txn_type,
                     'method': 'electronic_transfer',
                     'location': location,
@@ -1087,7 +1148,7 @@ class TransactionInjector:
                         '~label': 'TRANSACTS',
                         'txn_id:String': txn.get('txn_id', ''),
                         'amount:Double': txn.get('amount', 0),
-                        'currency:String': txn.get('currency', 'USD'),
+                        'currency:String': txn.get('currency', self._run_currency()),
                         'type:String': txn.get('type', 'transfer'),
                         'method:String': txn.get('method', 'electronic_transfer'),
                         'location:String': txn.get('location', ''),
@@ -1146,7 +1207,7 @@ class TransactionInjector:
             Tuple of (graph_success, kv_success)
         """
         txn_id = str(uuid.uuid4())
-        location = random.choice(self.locations)
+        location = random.choice(self._run_locations())
         
         graph_success = False
         kv_success = False
@@ -1179,7 +1240,7 @@ class TransactionInjector:
                 .to(__.V(receiver_id)) \
                 .property("txn_id", txn_id) \
                 .property("amount", round(amount, 2)) \
-                .property("currency", "USD") \
+                .property("currency", self._run_currency()) \
                 .property("type", txn_type) \
                 .property("method", "electronic_transfer") \
                 .property("location", location) \

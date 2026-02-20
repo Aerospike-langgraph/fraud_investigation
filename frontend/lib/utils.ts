@@ -32,11 +32,39 @@ export const formatDateTime = (dateString: string) => {
 	})
 }
 
-export const formatCurrency = (amount: number) => {
-	return new Intl.NumberFormat('en-US', {
-		style: 'currency',
-		currency: 'USD'
-	}).format(amount)
+// Locale identifiers used in Data Management (aligned with backend REGIONAL_CURRENCY)
+export const LOCALE_CURRENCY: Record<string, string> = {
+	american: 'USD',
+	indian: 'INR',
+	en_GB: 'GBP',
+	en_AU: 'AUD',
+	zh_CN: 'CNY',
+}
+
+const DISPLAY_LOCALE_KEY = 'fraud_app_display_locale'
+
+/** Current display locale for currency (persisted in localStorage). */
+export function getDisplayLocale(): string {
+	if (typeof window === 'undefined') return 'american'
+	const stored = localStorage.getItem(DISPLAY_LOCALE_KEY)
+	return stored && stored in LOCALE_CURRENCY ? stored : 'american'
+}
+
+/** Set display locale for currency app-wide (e.g. when user selects locale in Data Management). */
+export function setDisplayLocale(locale: string): void {
+	if (typeof window === 'undefined') return
+	if (locale in LOCALE_CURRENCY) localStorage.setItem(DISPLAY_LOCALE_KEY, locale)
+}
+
+/** Format amount with currency symbol for a given locale (american → $, indian → ₹, etc.). */
+export function formatCurrencyWithLocale(amount: number, locale?: string): string {
+	const loc = locale ?? getDisplayLocale()
+	const currency = LOCALE_CURRENCY[loc] ?? 'USD'
+	return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
+}
+
+export const formatCurrency = (amount: number, locale?: string) => {
+	return formatCurrencyWithLocale(amount, locale)
 }
 
 export const getRiskLevelColor = (riskLevel: string) => {

@@ -34,6 +34,7 @@ import { InvestigationReport } from '@/components/Flagged/Details/InvestigationR
 import PerformanceMetricsPanel from '@/components/Flagged/Details/PerformanceMetricsPanel'
 import { useInvestigation } from '@/hooks/useInvestigation'
 import { useAccountData } from '@/hooks/useAccountData'
+import { formatCurrency } from '@/lib/utils'
 
 const riskBadge = (severity: string) => {
     const colors = {
@@ -389,7 +390,7 @@ export default function FlaggedAccountDetailsPage() {
                                                             </div>
                                                             <div>
                                                                 <span className="text-slate-500">Balance</span>
-                                                                <p className="font-medium text-slate-900">${(acc.balance ?? 0).toLocaleString()}</p>
+                                                                <p className="font-medium text-slate-900">{formatCurrency(acc.balance ?? 0)}</p>
                                                             </div>
                                                             <div>
                                                                 <span className="text-slate-500">Status</span>
@@ -486,7 +487,7 @@ export default function FlaggedAccountDetailsPage() {
                                                             </div>
                                                         </div>
                                                         <div className="text-right">
-                                                            <p className="text-lg font-semibold text-slate-900">${(txn.amount ?? 0).toLocaleString()}</p>
+                                                            <p className="text-lg font-semibold text-slate-900">{formatCurrency(txn.amount ?? 0)}</p>
                                                             <span className={`text-xs px-2 py-0.5 rounded border ${riskBadge(txn.risk || 'low')}`}>
                                                                 {(txn.risk || 'low').toUpperCase()} RISK
                                                             </span>
@@ -498,7 +499,7 @@ export default function FlaggedAccountDetailsPage() {
                                                 <div className="flex justify-between items-center">
                                                     <span className="text-slate-500">Total Amount</span>
                                                     <span className="text-2xl font-bold text-red-600">
-                                                        ${(account.suspicious_transactions?.reduce((sum, t) => sum + (t.amount ?? 0), 0) ?? 0).toLocaleString()}
+                                                        {formatCurrency(account.suspicious_transactions?.reduce((sum, t) => sum + (t.amount ?? 0), 0) ?? 0)}
                                                     </span>
                                                 </div>
                                             </div>
@@ -610,7 +611,7 @@ export default function FlaggedAccountDetailsPage() {
                                                         <div className="flex items-center justify-between">
                                                             <p className="font-medium text-slate-900">{activity.action}</p>
                                                             {activity.amount != null && (
-                                                                <span className="font-semibold text-slate-900">${(activity.amount ?? 0).toLocaleString()}</span>
+                                                                <span className="font-semibold text-slate-900">{formatCurrency(activity.amount ?? 0)}</span>
                                                             )}
                                                         </div>
                                                         <p className="text-sm text-slate-500">{activity.time}</p>

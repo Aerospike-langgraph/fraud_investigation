@@ -16,6 +16,9 @@ import csv
 # Setup faker instances for different regions
 fake_us = Faker('en_US')
 fake_in = Faker('en_IN')
+fake_gb = Faker('en_GB')
+fake_au = Faker('en_AU')
+fake_cn = Faker('zh_CN')
 
 def set_seeds(seed=42):
     """Set random seeds for reproducible data generation"""
@@ -71,6 +74,84 @@ REGIONAL_DATA = {
             "Project Manager", "Real Estate Agent", "Construction Manager", "Doctor",
             "Government Officer", "Bank Manager", "Shopkeeper", "Farmer", "Driver",
             "Engineer", "Consultant", "Business Owner", "Professor"
+        ]
+    },
+    'en_GB': {
+        'faker': fake_gb,
+        'cities': [
+            "London", "Manchester", "Birmingham", "Edinburgh", "Glasgow", "Liverpool",
+            "Leeds", "Bristol", "Sheffield", "Newcastle", "Cardiff", "Belfast",
+            "Nottingham", "Southampton", "Brighton", "Leicester", "Coventry",
+            "Hull", "Bradford", "Stoke-on-Trent", "Wolverhampton", "Derby",
+            "Reading", "Plymouth", "Northampton", "Luton", "Aberdeen", "Portsmouth",
+            "Milton Keynes", "Swindon", "Dundee", "York", "Oxford", "Cambridge"
+        ],
+        'banks': [
+            "Barclays", "HSBC", "Lloyds Bank", "NatWest", "Santander UK",
+            "Standard Chartered", "Nationwide", "Royal Bank of Scotland",
+            "TSB Bank", "Virgin Money", "Metro Bank", "Starling Bank",
+            "Monzo", "Revolut", "First Direct"
+        ],
+        'phone_format': '+44-{area}-{number}',
+        'occupations': [
+            "Software Engineer", "Marketing Manager", "Financial Analyst", "Sales Representative",
+            "Teacher", "Accountant", "Nurse", "Police Officer", "Graphic Designer",
+            "Project Manager", "Data Scientist", "Construction Manager", "HR Specialist",
+            "Web Developer", "Real Estate Agent", "Doctor", "Solicitor", "Chef", "Electrician",
+            "Plumber", "Mechanic", "Dentist", "Architect", "Engineer", "Consultant"
+        ]
+    },
+    'en_AU': {
+        'faker': fake_au,
+        'cities': [
+            "Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide", "Gold Coast",
+            "Newcastle", "Canberra", "Sunshine Coast", "Wollongong", "Hobart",
+            "Geelong", "Townsville", "Cairns", "Darwin", "Toowoomba", "Ballarat",
+            "Bendigo", "Launceston", "Mackay", "Rockhampton", "Bundaberg",
+            "Coffs Harbour", "Wagga Wagga", "Hervey Bay", "Port Macquarie",
+            "Orange", "Dubbo", "Nowra", "Bathurst", "Warrnambool", "Kalgoorlie",
+            "Bunbury", "Rockingham", "Mandurah", "Albany", "Geraldton"
+        ],
+        'banks': [
+            "Commonwealth Bank", "Westpac", "NAB", "ANZ", "Macquarie Bank",
+            "Bendigo Bank", "Bank of Queensland", "Suncorp Bank", "ING Australia",
+            "Bankwest", "Beyond Bank", "Heritage Bank", "People's Choice",
+            "Great Southern Bank", "Bank Australia"
+        ],
+        'phone_format': '+61-{area}-{number}',
+        'occupations': [
+            "Software Engineer", "Marketing Manager", "Financial Analyst", "Sales Representative",
+            "Teacher", "Accountant", "Nurse", "Police Officer", "Graphic Designer",
+            "Project Manager", "Data Scientist", "Construction Manager", "HR Specialist",
+            "Web Developer", "Real Estate Agent", "Doctor", "Lawyer", "Chef", "Electrician",
+            "Plumber", "Mechanic", "Dentist", "Architect", "Engineer", "Consultant"
+        ]
+    },
+    'zh_CN': {
+        'faker': fake_cn,
+        'cities': [
+            "Beijing", "Shanghai", "Guangzhou", "Shenzhen", "Hangzhou", "Chengdu",
+            "Wuhan", "Xi'an", "Tianjin", "Nanjing", "Suzhou", "Zhengzhou",
+            "Changsha", "Shenyang", "Qingdao", "Dalian", "Ningbo", "Xiamen",
+            "Kunming", "Hefei", "Foshan", "Fuzhou", "Wuxi", "Nantong",
+            "Dongguan", "Zhongshan", "Zhuhai", "Jinan", "Harbin", "Changchun",
+            "Taiyuan", "Nanning", "Guiyang", "Lanzhou", "Haikou", "Yinchuan",
+            "Hohhot", "Urumqi", "Lhasa"
+        ],
+        'banks': [
+            "ICBC", "China Construction Bank", "Agricultural Bank of China", "Bank of China",
+            "Bank of Communications", "China Merchants Bank", "Shanghai Pudong Development Bank",
+            "Industrial Bank", "China Minsheng Bank", "China CITIC Bank",
+            "China Everbright Bank", "Ping An Bank", "Huaxia Bank", "Guangdong Development Bank",
+            "Beijing Bank", "Bank of Nanjing"
+        ],
+        'phone_format': '+86-{area}-{number}',
+        'occupations': [
+            "Software Engineer", "Marketing Manager", "Financial Analyst", "Sales Representative",
+            "Teacher", "Accountant", "Nurse", "Police Officer", "Graphic Designer",
+            "Project Manager", "Data Scientist", "Construction Manager", "HR Specialist",
+            "Web Developer", "Real Estate Agent", "Doctor", "Lawyer", "Chef", "Electrician",
+            "Plumber", "Mechanic", "Dentist", "Architect", "Engineer", "Consultant"
         ]
     }
 }
@@ -219,16 +300,26 @@ class UserDataGenerator:
                         self.device_pool.remove(device)
                         self.allocated_devices.add(device['id'])
     
+    def _generate_phone(self):
+        """Generate region-specific phone number."""
+        if self.region == 'american':
+            return f"+1-{random.randint(200, 999)}-{random.randint(200, 999)}-{random.randint(1000, 9999)}"
+        if self.region == 'indian':
+            return f"+91-{random.randint(70000, 99999)}-{random.randint(10000, 99999)}"
+        if self.region == 'en_GB':
+            return f"+44-{random.randint(10, 99)}-{random.randint(1000, 9999)}-{random.randint(100000, 999999)}"
+        if self.region == 'en_AU':
+            return f"+61-{random.randint(2, 9)}{random.randint(10000000, 99999999)}"
+        if self.region == 'zh_CN':
+            return f"+86-{random.randint(10, 99)}-{random.randint(10000000, 99999999)}"
+        return f"+1-{random.randint(200, 999)}-{random.randint(200, 999)}-{random.randint(1000, 9999)}"
+
     def generate_user(self, user_index):
         """Generate a single user with realistic data"""
         user_id = f"U{str(user_index + 1).zfill(7)}"  # 7 digits to support millions of users
         
-        if self.region == 'american':
-            name = self.faker.name()
-            phone = f"+1-{random.randint(200, 999)}-{random.randint(200, 999)}-{random.randint(1000, 9999)}"
-        else:
-            name = self.faker.name()
-            phone = f"+91-{random.randint(70000, 99999)}-{random.randint(10000, 99999)}"
+        name = self.faker.name()
+        phone = self._generate_phone()
         
         email = f"{name.lower().replace(' ', '.')}@{self.faker.domain_name()}"
         age = random.randint(18, 70)
@@ -557,7 +648,7 @@ class UserDataGenerator:
 def main():
     parser = argparse.ArgumentParser(description="Generate user data for fraud detection with Aerospike Graph CSV format")
     parser.add_argument("--users", type=int, default=100, help="Number of users to generate (default: 100)")
-    parser.add_argument("--region", choices=['indian', 'american'], default='american', 
+    parser.add_argument("--region", choices=['american', 'indian', 'en_GB', 'en_AU', 'zh_CN'], default='american',
                        help="Demographics region (default: american)")
     parser.add_argument("--output", default="./data/graph_csv", help="Output directory (default: ./data/graph_csv)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible data (default: 42)")

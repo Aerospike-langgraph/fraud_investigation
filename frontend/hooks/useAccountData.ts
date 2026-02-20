@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { formatCurrency } from '@/lib/utils'
 
 // Types matching the backend API responses
 interface UserProfile {
@@ -551,7 +552,7 @@ export function useGraphData(userId: string) {
                     details: {
                         'Account': accId,
                         'Type': acc.type,
-                        'Balance': `$${(acc.balance || 0).toLocaleString()}`,
+                        'Balance': formatCurrency(acc.balance || 0),
                         'Status': acc.status || 'active'
                     }
                 })
@@ -650,7 +651,7 @@ export function useGraphData(userId: string) {
                         details: {
                             'User ID': otherPartyId,
                             'Name': otherParty.name || 'Unknown',
-                            'Connection': `Transaction: $${txn.txn?.amount || txn.amount || 0}`
+                            'Connection': `Transaction: ${formatCurrency(txn.txn?.amount || txn.amount || 0)}`
                         }
                     })
                     
@@ -660,7 +661,7 @@ export function useGraphData(userId: string) {
                         source: sourceAccount,
                         target: otherPartyId,
                         type: 'transaction',
-                        label: `$${(txn.txn?.amount || txn.amount || 0).toLocaleString()}`
+                        label: formatCurrency(txn.txn?.amount || txn.amount || 0)
                     })
                 }
             })

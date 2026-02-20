@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from typing import Optional, List
 from datetime import datetime
+from pydantic import BaseModel
 import urllib.parse
 import tempfile
 import zipfile
@@ -11,6 +12,8 @@ import os
 import shutil
 import json
 import asyncio
+import subprocess
+import sys
 
 from sse_starlette.sse import EventSourceResponse
 
@@ -844,12 +847,16 @@ def reset_performance_metrics():
 # ----------------------------------------------------------------------------------------------------------
 
 
+ALLOWED_LOCALES = frozenset({"american", "indian", "en_GB", "en_AU", "zh_CN"})
+
+
 @app.post("/bulk-load-csv")
 def bulk_load_csv_data(
-    vertices_path: Optional[str] = None, 
+    vertices_path: Optional[str] = None,
     edges_path: Optional[str] = None,
     load_graph: bool = True,
-    load_aerospike: bool = True
+    load_aerospike: bool = True,
+    locale: Optional[str] = None
 ):
     """
     Bulk load data from CSV files.
@@ -858,13 +865,15 @@ def bulk_load_csv_data(
     - Aerospike Graph (vertices and edges)
     - Aerospike KV (users for risk evaluation tracking)
     
-    This simulates receiving account data from a third-party system.
+    When locale is provided and vertices_path is not set, runs the user data
+    generator for the selected locale before loading.
     
     Args:
         vertices_path: Path to vertices CSV directory
         edges_path: Path to edges CSV directory
         load_graph: Load data into Aerospike Graph (default: True)
         load_aerospike: Load users into Aerospike KV for tracking (default: True)
+        locale: Demographics region for default data (american, indian, en_GB, en_AU, zh_CN)
     """
     result = {
         "success": True,
@@ -873,8 +882,15 @@ def bulk_load_csv_data(
         "message": ""
     }
     
+    # Validate locale if provided
+    if locale is not None and locale not in ALLOWED_LOCALES:
+        raise HTTPException(status_code=400, detail=f"Invalid locale. Allowed: {sorted(ALLOWED_LOCALES)}")
+    
     # Calculate total steps for progress tracking
     total_steps = 0
+    run_generator = locale is not None and vertices_path is None
+    if run_generator:
+        total_steps += 1  # Generating locale-specific data
     if load_graph:
         total_steps += 3  # Graph: start, load, verify
     if load_aerospike:
@@ -886,6 +902,33 @@ def bulk_load_csv_data(
     current_step = 0
     
     try:
+        # When using default path and locale is set, run the generator script first
+        if run_generator:
+            current_step += 1
+            progress_service.update_progress("bulk_load", current_step, "Generating locale-specific data...")
+            script_path = "/backend/scripts/generate_user_data.py"
+            if not os.path.exists(script_path):
+                logger.error(f"Generator script not found: {script_path}")
+                progress_service.fail_operation("bulk_load", "Generator script not found", "Bulk load failed")
+                raise HTTPException(status_code=500, detail="Generator script not found")
+            try:
+                proc = subprocess.run(
+                    [sys.executable, script_path, "--region", locale, "--users", "10000", "--output", "/data/graph_csv", "--seed", "42"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd="/backend"
+                )
+                if proc.returncode != 0:
+                    logger.error(f"Generator failed: stdout={proc.stdout!r}, stderr={proc.stderr!r}")
+                    progress_service.fail_operation("bulk_load", proc.stderr or proc.stdout or "Generator failed", "Bulk load failed")
+                    raise HTTPException(status_code=500, detail=f"Data generation failed: {proc.stderr or proc.stdout or 'Unknown error'}")
+                logger.info(f"Generator completed: {proc.stdout[:500] if proc.stdout else 'ok'}")
+            except subprocess.TimeoutExpired:
+                logger.error("Generator timed out after 300s")
+                progress_service.fail_operation("bulk_load", "Generator timed out", "Bulk load failed")
+                raise HTTPException(status_code=500, detail="Data generation timed out after 300 seconds")
+        
         # Clear existing transacts.csv before bulk load to prevent loading stale transactions
         transacts_path = "/data/graph_csv/edges/transactions/transacts.csv"
         if os.path.exists(transacts_path):
@@ -1058,7 +1101,8 @@ def bulk_load_gremlin_data(
 def inject_historical_transactions(
     transaction_count: int = Query(10000, ge=100, le=100000, description="Total transactions to generate"),
     spread_days: int = Query(30, ge=1, le=365, description="Days to spread transactions over"),
-    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions")
+    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions"),
+    locale: Optional[str] = None
 ):
     """
     Inject historical transactions with fraud patterns for testing.
@@ -1070,6 +1114,8 @@ def inject_historical_transactions(
     - Amount anomalies (20%): High-value outlier transactions
     - New account fraud (15%): Immediate activity after creation
     """
+    if locale is not None and locale not in ALLOWED_LOCALES:
+        raise HTTPException(status_code=400, detail=f"Invalid locale. Allowed: {sorted(ALLOWED_LOCALES)}")
     if not transaction_injector:
         raise HTTPException(status_code=503, detail="Transaction injector not available. Aerospike may not be connected.")
     
@@ -1077,7 +1123,8 @@ def inject_historical_transactions(
         result = transaction_injector.inject_historical_transactions(
             transaction_count=transaction_count,
             spread_days=spread_days,
-            fraud_percentage=fraud_percentage
+            fraud_percentage=fraud_percentage,
+            locale=locale
         )
         return result
     except Exception as e:
@@ -1085,11 +1132,18 @@ def inject_historical_transactions(
         raise HTTPException(status_code=500, detail=f"Failed to inject transactions: {str(e)}")
 
 
+class InjectBulkBody(BaseModel):
+    """Optional body for inject-transactions-bulk (locale preferred from body for POST)."""
+    locale: Optional[str] = None
+
+
 @app.post("/inject-transactions-bulk")
 def inject_transactions_bulk(
     transaction_count: int = Query(10000, ge=100, le=100000, description="Number of transactions to generate"),
     spread_days: int = Query(30, ge=1, le=365, description="Days to spread transactions over"),
-    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions")
+    fraud_percentage: float = Query(0.15, ge=0.0, le=0.5, description="Percentage of fraudulent transactions"),
+    locale: Optional[str] = None,
+    body: Optional[InjectBulkBody] = Body(None)
 ):
     """
     Bulk inject historical transactions using optimized batch operations.
@@ -1102,6 +1156,11 @@ def inject_transactions_bulk(
     
     For 10,000 transactions: ~3 DB operations instead of ~50,000.
     """
+    # Prefer locale from request body (reliable for POST); fall back to query
+    locale = locale or (body.locale if body else None)
+    logger.info(f"Inject transactions bulk: locale={locale!r} (will use regional locations/currency)")
+    if locale is not None and locale not in ALLOWED_LOCALES:
+        raise HTTPException(status_code=400, detail=f"Invalid locale. Allowed: {sorted(ALLOWED_LOCALES)}")
     if not transaction_injector:
         raise HTTPException(status_code=503, detail="Transaction injector not available. Aerospike may not be connected.")
     
@@ -1109,7 +1168,8 @@ def inject_transactions_bulk(
         result = transaction_injector.inject_transactions_bulk(
             transaction_count=transaction_count,
             spread_days=spread_days,
-            fraud_percentage=fraud_percentage
+            fraud_percentage=fraud_percentage,
+            locale=locale
         )
         return result
     except Exception as e:

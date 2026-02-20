@@ -10,6 +10,8 @@ RUN apk add --no-cache \
     zlib-dev \
     yaml-dev
 COPY ./backend /backend
+RUN mkdir -p /backend/scripts
+COPY ./scripts/generate_user_data.py /backend/scripts/generate_user_data.py
 WORKDIR /backend
 RUN pip install -r requirements.txt
 

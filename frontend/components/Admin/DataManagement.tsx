@@ -45,6 +45,7 @@ import {
     ChevronUp
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { setDisplayLocale, getDisplayLocale, formatCurrencyWithLocale } from '@/lib/utils'
 
 interface BulkLoadStatus {
     loading: boolean
@@ -140,6 +141,11 @@ const DataManagement = () => {
     
     // Data source options
     const [useDefaultData, setUseDefaultData] = useState(true)
+    const [defaultLocale, setDefaultLocale] = useState<string>(() =>
+        typeof window !== 'undefined' ? getDisplayLocale() : 'american'
+    )
+    // Locale committed when user clicks Start bulk load (used for Inject); dropdown is independent until next bulk load
+    const [committedLocale, setCommittedLocale] = useState<string | null>(null)
     const [uploadedFile, setUploadedFile] = useState<File | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     
@@ -267,6 +273,12 @@ const DataManagement = () => {
         fetchHistory()
     }, [])
 
+    // Sync display locale from localStorage on mount (so dropdown matches app-wide currency)
+    useEffect(() => {
+        const saved = getDisplayLocale()
+        setDefaultLocale(saved)
+    }, [])
+
     // Trigger bulk load
     const handleBulkLoad = async () => {
         if (!loadGraph && !loadAerospike) {
@@ -292,10 +304,13 @@ const DataManagement = () => {
             let response: Response
             
             if (useDefaultData) {
-                // Use default data - simple query params
+                // Use default data - commit locale now (Inject will use this, not the dropdown)
+                setCommittedLocale(defaultLocale)
+                setDisplayLocale(defaultLocale)
                 const params = new URLSearchParams()
                 params.set('load_graph', String(loadGraph))
                 params.set('load_aerospike', String(aerospikeStats?.connected ? loadAerospike : false))
+                params.set('locale', defaultLocale)
                 
                 response = await fetch(`/api/bulk-load-csv?${params.toString()}`, {
                     method: 'POST',
@@ -499,14 +514,19 @@ const DataManagement = () => {
         }, 500)
         
         try {
+            // Use locale committed when bulk load was run (not current dropdown)
+            const localeToUse = committedLocale ?? defaultLocale
             const params = new URLSearchParams({
                 transaction_count: String(txnCount),
                 spread_days: String(spreadDays),
                 fraud_percentage: String(fraudPercentage / 100) // Convert to decimal
             })
+            params.set('locale', localeToUse)
             
             const response = await fetch(`/api/inject-transactions-bulk?${params.toString()}`, {
-                method: 'POST'
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ locale: localeToUse })
             })
             
             const data = await response.json()
@@ -807,9 +827,26 @@ const DataManagement = () => {
                             </div>
                         </div>
 
-                        {/* Default Data Info */}
-                        <div className={`rounded-lg border border-border/80 bg-muted/30 p-3 space-y-1.5 transition-opacity ${!useDefaultData ? 'opacity-50' : ''}`}>
+                        {/* Default Data Info + Locale */}
+                        <div className={`rounded-lg border border-border/80 bg-muted/30 p-3 space-y-2 transition-opacity ${!useDefaultData ? 'opacity-50' : ''}`}>
                             <p className="text-xs font-medium text-foreground">Default data</p>
+                            {useDefaultData && (
+                                <div className="space-y-1">
+                                    <Label htmlFor="default-locale" className="text-xs text-muted-foreground">Locale</Label>
+                                    <select
+                                        id="default-locale"
+                                        value={defaultLocale}
+                                        onChange={(e) => setDefaultLocale(e.target.value)}
+                                        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                                    >
+                                        <option value="american">American</option>
+                                        <option value="indian">Indian</option>
+                                        <option value="en_GB">UK</option>
+                                        <option value="en_AU">Australia</option>
+                                        <option value="zh_CN">China</option>
+                                    </select>
+                                </div>
+                            )}
                             <ul className="text-xs text-muted-foreground space-y-1">
                                 <li className="flex items-center gap-1.5"><Users className="h-3 w-3 shrink-0" />10k users</li>
                                 <li className="flex items-center gap-1.5"><CreditCard className="h-3 w-3 shrink-0" />~21k accounts</li>
@@ -1075,7 +1112,7 @@ const DataManagement = () => {
                             <div className="p-3 rounded-lg border border-purple-200/80 dark:border-purple-800/80 bg-purple-50/80 dark:bg-purple-950/30">
                                 <p className="font-medium text-purple-700 dark:text-purple-300">High amounts (20%)</p>
                                 <p className="text-purple-600 dark:text-purple-400 mt-1">~{Math.round(txnCount * fraudPercentage / 100 * 0.2)} txns</p>
-                                <p className="text-muted-foreground mt-1">$15k–$100k outliers</p>
+                                <p className="text-muted-foreground mt-1">{formatCurrencyWithLocale(15000)}–{formatCurrencyWithLocale(100000)} outliers</p>
                             </div>
                             <div className="p-3 rounded-lg border border-blue-200/80 dark:border-blue-800/80 bg-blue-50/80 dark:bg-blue-950/30">
                                 <p className="font-medium text-blue-700 dark:text-blue-300">New account (15%)</p>
