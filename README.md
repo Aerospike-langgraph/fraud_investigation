@@ -6,6 +6,7 @@ A comprehensive fraud detection system built with FastAPI backend and Next.js fr
 
 Run Docker compose to build. the necessary containers
 ```
+export GEMINI_API_KEY=""
 DOCKER_BUILDKIT=0 docker compose up -d
 ```
 
