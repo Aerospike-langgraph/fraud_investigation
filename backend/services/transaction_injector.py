@@ -952,6 +952,7 @@ class TransactionInjector:
                     
                     result["graph_edges_added"] = graph_success_count
                     result["graph_edges_failed"] = graph_fail_count
+                    result["graph_writes"] = graph_success_count
                     logger.info(f"✅ Graph edges: {graph_success_count} added, {graph_fail_count} failed (parallel with {max_workers} workers)")
                     
                     # Verify TRANSACTS edges were created
@@ -970,8 +971,10 @@ class TransactionInjector:
             if self.kv and self.kv.is_connected():
                 kv_result = self.kv.batch_store_transactions(kv_transactions)
                 result["kv_batch_write"] = kv_result
+                result["kv_writes"] = kv_result.get("stored", len(kv_transactions)) if isinstance(kv_result, dict) else len(kv_transactions)
                 logger.info(f"KV batch write result: {kv_result}")
             else:
+                result["kv_writes"] = 0
                 result["errors"].append("KV service not available for batch write")
             
             result["status"] = "completed"
